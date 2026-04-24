@@ -1434,6 +1434,14 @@ class CElectricSheep
 // MARK: Main per frame update loop
     virtual bool DoRealFrameUpdate(uint32_t displayUnit)
     {
+        // Check closed BEFORE BeginFrame to avoid blocking in vkWaitForFences /
+        // vkAcquireNextImageKHR with an infinite timeout after the display is closed.
+        if (g_Player().Closed())
+        {
+            g_Log->Info("Player closed (pre-frame check)...");
+            return false;
+        }
+
         if (!g_Player().BeginDisplayFrame(displayUnit))
             return true;
 

@@ -1458,16 +1458,8 @@ void CPlayer::SkipToNext()
 {
     g_Log->Info("Next");
 
-    // Check quota first - if quota is 0, don't allow streaming
-    Cache::CacheManager& cm = Cache::CacheManager::getInstance();
-    bool canStream = cm.getRemainingQuota() > 0;
-
-    if (!canStream) {
-        g_Log->Info("Quota is 0, using cache-only mode for Next");
-    }
-
-    // Get the next dream decision - use forceNext=true to advance even in repeat mode
-    auto nextDecision = m_playlistManager->preflightNextDream(canStream, true);
+    // User-initiated navigation always streams — quota governs background downloads, not keypresses.
+    auto nextDecision = m_playlistManager->preflightNextDream(true, true);
     if (!nextDecision) {
         g_Log->Error("No next dream available");
         return;
@@ -1480,11 +1472,7 @@ void CPlayer::SkipToNext()
               isDreamCached ? "" : "not ");
 
     if (!isDreamCached) {
-        if (!canStream) {
-            g_Log->Warning("Next dream is not cached and quota is 0, cannot stream");
-            return;
-        }
-        g_Log->Info("Next dream is not cached, will try loading and playin immediately");
+        g_Log->Info("Next dream is not cached, streaming it");
         PlayDreamNow(nextDecision->dream->uuid, -1);
         return;
     }
@@ -1566,13 +1554,8 @@ void CPlayer::ReturnToPrevious()
 
     bool isDreamCached = !previousDream->getCachedPath().empty();
     if (!isDreamCached) {
-        // Check quota before allowing streaming
-        Cache::CacheManager& cm = Cache::CacheManager::getInstance();
-        if (cm.getRemainingQuota() <= 0) {
-            g_Log->Warning("Previous dream is not cached and quota is 0, cannot stream");
-            return;
-        }
-        g_Log->Info("Previous dream is not cached, will try loading and playing immediately");
+        // User-initiated navigation always streams — quota governs background downloads.
+        g_Log->Info("Previous dream not cached, streaming it");
         PlayDreamNow(previousDream->uuid, -1);
         return;
     }
