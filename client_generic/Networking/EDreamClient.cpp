@@ -21,6 +21,7 @@
 #include "Log.h"
 #include "Player.h"
 #include "Settings.h"
+#include "SecureStorage.h"
 #include "ServerConfig.h"
 #include "NetworkConfig.h"
 #include "PathManager.h"
@@ -81,6 +82,7 @@ std::atomic<bool> EDreamClient::fIsLoggedIn(false);
 std::atomic<bool> EDreamClient::fAuthRetryAbort(false);
 std::atomic<bool> EDreamClient::fAuthRetryPending(false);
 std::atomic<bool> EDreamClient::fInitialAuthComplete(false);
+boost::thread EDreamClient::s_authThread;
 std::atomic<int> EDreamClient::fCpuUsage(0);
 std::mutex EDreamClient::fAuthMutex;
 std::condition_variable EDreamClient::fAuthCV;
@@ -483,14 +485,20 @@ void EDreamClient::InitializeClient()
 
     fInitialAuthComplete.store(false);
 
-    boost::thread authThread(&EDreamClient::Authenticate);
-    authThread.detach();
+    s_authThread = boost::thread(&EDreamClient::Authenticate);
 }
 
 void EDreamClient::DeinitializeClient()
 {
     // Signal auth retry loop to exit (if running)
     fAuthRetryAbort.store(true);
+
+    // Interrupt and join the auth thread so we don't leave a dangling thread
+    if (s_authThread.joinable())
+    {
+        s_authThread.interrupt();
+        s_authThread.join();
+    }
     // Multiple instances do not connect to websocket, just return
     if (g_Client()->IsMultipleInstancesMode()) {
         return;
@@ -511,32 +519,28 @@ void EDreamClient::DeinitializeClient()
     // Send goodbye message
     SendGoodbye();
 
-    // WARNING, enabling this causes socket.io to crash. There's a workaround but
-    // it's messy, see here
-    // https://github.com/socketio/socket.io-client-cpp/issues/404
-    // IF we fix this, we can reenable connection closing and enable account switwching
-    // Close the WebSocket connection
-    //s_SIOClient.close();
-  
-    /*
-    s_SIOClient.set_open_listener(nullptr);
-    s_SIOClient.set_close_listener(nullptr);
-    s_SIOClient.set_fail_listener(nullptr);
-    s_SIOClient.set_reconnecting_listener(nullptr);
-    s_SIOClient.set_reconnect_listener(nullptr);*/
+    // Workaround for socket.io-client-cpp bug #404: calling close() while
+    // callbacks are registered causes re-entrancy into the internal mutex.
+    // Solution: clear all listeners first so no callbacks fire during close,
+    // then use sync_close() (which waits for the TCP teardown to complete).
+    s_SIOClient.clear_con_listeners();
+    s_SIOClient.clear_socket_listeners();
+    try {
+        s_SIOClient.sync_close();
+    } catch (...) {}
 }
 
 // Appends the appropriate auth header to a request.
 // Prefers wos-session cookie (sealed session), falls back to Api-Key header.
 void EDreamClient::AppendAuthHeader(Network::spCFileDownloader& spDownload)
 {
-    std::string sealedSession = g_Settings()->Get("settings.content.sealed_session", std::string(""));
+    std::string sealedSession = SecureStorage::Get("settings.content.sealed_session");
     if (!sealedSession.empty())
     {
         spDownload->AppendHeader("Cookie: wos-session=" + sealedSession);
         return;
     }
-    std::string apiKey = g_Settings()->Get("settings.content.api_key", std::string(""));
+    std::string apiKey = SecureStorage::Get("settings.content.api_key");
     if (!apiKey.empty())
     {
         spDownload->AppendHeader("Api-Key: " + apiKey);
@@ -547,7 +551,7 @@ void EDreamClient::AppendAuthHeader(Network::spCFileDownloader& spDownload)
 // the backend middleware accepts Api-Key header directly on all protected endpoints).
 bool EDreamClient::SignInWithApiKey(const std::string& apiKey)
 {
-    g_Settings()->Set("settings.content.api_key", apiKey);
+    SecureStorage::Set("settings.content.api_key", apiKey);
     g_Settings()->Storage()->Commit();
     g_Log->Info("Signed in with API key");
     return true;
@@ -650,7 +654,7 @@ bool EDreamClient::Authenticate()
     g_Log->Info("Starting Authentication...");
 
     // Check if we have a sealed session
-    std::string sealedSession = g_Settings()->Get("settings.content.sealed_session", std::string(""));
+    std::string sealedSession = SecureStorage::Get("settings.content.sealed_session");
 
     if (sealedSession.empty())
     {
@@ -688,7 +692,7 @@ bool EDreamClient::Authenticate()
         }
         else
         {
-            std::string storedKey = g_Settings()->Get("settings.content.api_key", std::string(""));
+            std::string storedKey = SecureStorage::Get("settings.content.api_key");
             if (!storedKey.empty())
             {
                 g_Log->Info("Found stored API key, using it");
@@ -784,7 +788,7 @@ bool EDreamClient::Authenticate()
         }
 
         fIsLoggedIn.exchange(false);
-        g_Settings()->Set("settings.content.sealed_session", std::string(""));
+        SecureStorage::Set("settings.content.sealed_session", std::string(""));
         g_Settings()->Storage()->Commit();
         fInitialAuthComplete.store(true);
         fAuthCV.notify_one();
@@ -855,7 +859,7 @@ bool EDreamClient::Authenticate()
                 return true;
             }
 
-            g_Settings()->Set("settings.content.sealed_session", std::string(""));
+            SecureStorage::Set("settings.content.sealed_session", std::string(""));
             g_Settings()->Storage()->Commit();
             return false;
         }
@@ -935,7 +939,7 @@ void EDreamClient::SignOut()
     {
         std::lock_guard<std::mutex> lock(fAuthMutex);
         // Retrieve the current sealed session from settings
-        currentSealedSession = g_Settings()->Get("settings.content.sealed_session", std::string(""));
+        currentSealedSession = SecureStorage::Get("settings.content.sealed_session");
 
         if (currentSealedSession.empty())
         {
@@ -970,7 +974,7 @@ void EDreamClient::SignOut()
     {
         std::lock_guard<std::mutex> lock(fAuthMutex);
         fIsLoggedIn.exchange(false);
-        g_Settings()->Set("settings.content.sealed_session", std::string(""));
+        SecureStorage::Set("settings.content.sealed_session", std::string(""));
         g_Settings()->Set("settings.content.refresh_token", std::string(""));
         g_Settings()->Storage()->Commit();
     }  // Release lock before external calls
@@ -1176,7 +1180,7 @@ EDreamClient::ValidateCodeResult EDreamClient::ValidateCodeDetailed(const std::s
                 
                 if (dataObj.contains("sealedSession") && dataObj["sealedSession"].is_string()) {
                     std::string sealedSession = dataObj["sealedSession"].as_string().c_str();
-                    g_Settings()->Set("settings.content.sealed_session", sealedSession);
+                    SecureStorage::Set("settings.content.sealed_session", sealedSession);
                     g_Settings()->Storage()->Commit();
                     
                     g_Log->Info("Sealed session saved successfully");
@@ -1258,7 +1262,7 @@ EDreamClient::ValidateCodeResult EDreamClient::ValidateCodeDetailed(const std::s
 EDreamClient::AuthRefreshResult EDreamClient::RefreshSealedSession()
 {
     // Retrieve the current sealed session from settings
-    std::string currentSealedSession = g_Settings()->Get("settings.content.sealed_session", std::string(""));
+    std::string currentSealedSession = SecureStorage::Get("settings.content.sealed_session");
     
     if (currentSealedSession.empty())
     {
@@ -1310,7 +1314,7 @@ EDreamClient::AuthRefreshResult EDreamClient::RefreshSealedSession()
                 if (dataObj.contains("sealedSession") && dataObj["sealedSession"].is_string())
                 {
                     std::string newSealedSession = dataObj["sealedSession"].as_string().c_str();
-                    g_Settings()->Set("settings.content.sealed_session", newSealedSession);
+                    SecureStorage::Set("settings.content.sealed_session", newSealedSession);
                     g_Settings()->Storage()->Commit();  // Save the settings
 
                     g_Log->Info("New sealed session saved successfully");
@@ -1375,7 +1379,7 @@ void EDreamClient::ParseAndSaveCookies(const Network::spCFileDownloader& spDownl
             value.erase(value.find_last_not_of(" \t") + 1);
             
             if (name == "wos-session") {
-                g_Settings()->Set("settings.content.sealed_session", value);
+                SecureStorage::Set("settings.content.sealed_session", value);
                 g_Log->Info("Updated wos-session cookie");
             } else if (name == "connect.sid") {
                 g_Settings()->Set("settings.content.connect_sid", value);
@@ -1588,7 +1592,7 @@ std::string EDreamClient::GetCurrentServerPlaylist() {
         } catch (...) {
             // Defensive: if something throws, still clear local auth state.
             fIsLoggedIn.exchange(false);
-            g_Settings()->Set("settings.content.sealed_session", std::string(""));
+            SecureStorage::Set("settings.content.sealed_session", std::string(""));
             g_Settings()->Set("settings.content.refresh_token", std::string(""));
             g_Settings()->Storage()->Commit();
             g_Player().SetOfflineMode(true);
@@ -2243,6 +2247,10 @@ std::vector<PlaylistEntry> EDreamClient::ParsePlaylist(std::string_view uuid) {
     {
         JSONUtil::LogException(e, contents);
     }
+    catch (const std::exception& e)
+    {
+        g_Log->Error("ParsePlaylist: JSON parse error: %s", e.what());
+    }
 
     // Do we need to fetch metadata?
     if (!needsMetadataUuids.empty()) {
@@ -2645,8 +2653,8 @@ void EDreamClient::ConnectRemoteControlSocket()
 
     std::map<std::string, std::string> query;
     
-    std::string sealedSession = g_Settings()->Get("settings.content.sealed_session", std::string(""));
-    std::string apiKey = g_Settings()->Get("settings.content.api_key", std::string(""));
+    std::string sealedSession = SecureStorage::Get("settings.content.sealed_session");
+    std::string apiKey = SecureStorage::Get("settings.content.api_key");
 
     if (sealedSession.empty() && apiKey.empty())
     {

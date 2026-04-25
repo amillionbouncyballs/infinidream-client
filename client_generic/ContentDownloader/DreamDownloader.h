@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <condition_variable>
 #include <mutex>
 #include <future>
 #include <boost/thread.hpp>
@@ -34,11 +35,15 @@ public:
 
     void StopFindingDreams()  {
         isRunning.store(false);
+        m_downloadCV.notify_all(); // wake the thread so it can exit
         if (thread.joinable()) {
             thread.interrupt();
             thread.join();
         }
     }
+
+    // Wake the download thread early (e.g. after quota/playlist change)
+    void WakeDownloadThread() { m_downloadCV.notify_one(); }
     
     // Get the next dream to download from PlaylistManager
     std::optional<std::string> GetNextDreamToDownload();
@@ -75,6 +80,10 @@ private:
     
     // Disk space warning flag
     std::atomic<bool> m_diskSpaceLow{false};
+
+    // Condition variable used instead of a hard sleep between download iterations
+    std::mutex              m_downloadCVMutex;
+    std::condition_variable m_downloadCV;
 
 };
 

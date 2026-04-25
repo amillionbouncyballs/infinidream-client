@@ -21,8 +21,8 @@
 
 namespace Cache {
 
-using boost::filesystem::exists;
 namespace fs = std::filesystem;
+using fs::exists;
 
 std::unique_ptr<CacheManager> CacheManager::instance;
 long long CacheManager::remainingQuota = 0;
@@ -243,9 +243,9 @@ bool CacheManager::deleteDream(const std::string& uuid) {
 
     // Remove the file
     try {
-        boost::filesystem::remove(filePath);
+        fs::remove(filePath);
         g_Log->Info("Deleted dream file: %s", filePath.c_str());
-    } catch (const boost::filesystem::filesystem_error& e) {
+    } catch (const fs::filesystem_error& e) {
         g_Log->Error("Failed to delete dream file: %s. Error: %s", filePath.c_str(), e.what());
         return false;
     }

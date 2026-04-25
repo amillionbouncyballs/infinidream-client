@@ -78,6 +78,9 @@ CRendererVulkan::~CRendererVulkan()
     if (m_timestampPool       != VK_NULL_HANDLE) vkDestroyQueryPool(m_device, m_timestampPool, nullptr);
     // Command buffers freed with pool
     if (m_commandPool         != VK_NULL_HANDLE) vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+    if (m_yuvPipeline            != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_yuvPipeline, nullptr);
+    if (m_yuvPipelineLayout      != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_yuvPipelineLayout, nullptr);
+    if (m_yuvDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, m_yuvDescriptorSetLayout, nullptr);
     if (m_pipeline            != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_pipeline, nullptr);
     if (m_pipelineLayout      != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
     if (m_descriptorPool      != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
@@ -628,6 +631,159 @@ bool CRendererVulkan::createPipeline()
 }
 
 // ---------------------------------------------------------------------------
+// YUV descriptor set layout (2 bindings: Y plane + UV plane)
+// ---------------------------------------------------------------------------
+bool CRendererVulkan::createYuvDescriptorSetLayout()
+{
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    for (int i = 0; i < 2; ++i)
+    {
+        bindings[i].binding            = static_cast<uint32_t>(i);
+        bindings[i].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount    = 1;
+        bindings[i].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[i].pImmutableSamplers = nullptr;
+    }
+
+    VkDescriptorSetLayoutCreateInfo ci{};
+    ci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ci.bindingCount = 2;
+    ci.pBindings    = bindings;
+
+    return vkCreateDescriptorSetLayout(m_device, &ci, nullptr,
+                                       &m_yuvDescriptorSetLayout) == VK_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// YUV graphics pipeline — same vertex shader, NV12 fragment shader
+// ---------------------------------------------------------------------------
+bool CRendererVulkan::createYuvPipeline()
+{
+    std::string shaderDir = PlatformUtils::GetWorkingDir() + "shaders/";
+
+    VkShaderModule vert = loadShader(shaderDir + "quad.vert.spv");
+    VkShaderModule frag = loadShader(shaderDir + "quad_yuv.frag.spv");
+    if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE)
+    {
+        g_Log->Error("CRendererVulkan: failed to load YUV shaders");
+        if (vert != VK_NULL_HANDLE) vkDestroyShaderModule(m_device, vert, nullptr);
+        if (frag != VK_NULL_HANDLE) vkDestroyShaderModule(m_device, frag, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName  = "main";
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName  = "main";
+
+    VkVertexInputBindingDescription binding{};
+    binding.binding   = 0;
+    binding.stride    = sizeof(QuadVertex);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription attrs[2]{};
+    attrs[0].location = 0; attrs[0].binding = 0;
+    attrs[0].format   = VK_FORMAT_R32G32_SFLOAT;
+    attrs[0].offset   = offsetof(QuadVertex, x);
+    attrs[1].location = 1; attrs[1].binding = 0;
+    attrs[1].format   = VK_FORMAT_R32G32_SFLOAT;
+    attrs[1].offset   = offsetof(QuadVertex, u);
+
+    VkPipelineVertexInputStateCreateInfo vertInput{};
+    vertInput.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertInput.vertexBindingDescriptionCount   = 1;
+    vertInput.pVertexBindingDescriptions      = &binding;
+    vertInput.vertexAttributeDescriptionCount = 2;
+    vertInput.pVertexAttributeDescriptions    = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkDynamicState dynStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynState{};
+    dynState.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynState.dynamicStateCount = 2;
+    dynState.pDynamicStates    = dynStates;
+
+    VkPipelineViewportStateCreateInfo vpState{};
+    vpState.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vpState.viewportCount = 1;
+    vpState.scissorCount  = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster{};
+    raster.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode    = VK_CULL_MODE_NONE;
+    raster.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth   = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{};
+    ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAtt{};
+    blendAtt.blendEnable         = VK_TRUE;
+    blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAtt.colorBlendOp        = VK_BLEND_OP_ADD;
+    blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blendAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
+    blendAtt.colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1;
+    blend.pAttachments    = &blendAtt;
+
+    VkPushConstantRange pcRange{};
+    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcRange.offset     = 0;
+    pcRange.size       = sizeof(VkPushConstants);
+
+    VkPipelineLayoutCreateInfo plci{};
+    plci.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount         = 1;
+    plci.pSetLayouts            = &m_yuvDescriptorSetLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges    = &pcRange;
+    vkCreatePipelineLayout(m_device, &plci, nullptr, &m_yuvPipelineLayout);
+
+    VkGraphicsPipelineCreateInfo pci{};
+    pci.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pci.stageCount          = 2;
+    pci.pStages             = stages;
+    pci.pVertexInputState   = &vertInput;
+    pci.pInputAssemblyState = &inputAssembly;
+    pci.pViewportState      = &vpState;
+    pci.pRasterizationState = &raster;
+    pci.pMultisampleState   = &ms;
+    pci.pColorBlendState    = &blend;
+    pci.pDynamicState       = &dynState;
+    pci.layout              = m_yuvPipelineLayout;
+    pci.renderPass          = m_renderPass;
+
+    VkResult result = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci,
+                                                nullptr, &m_yuvPipeline);
+    vkDestroyShaderModule(m_device, vert, nullptr);
+    vkDestroyShaderModule(m_device, frag, nullptr);
+
+    if (result == VK_SUCCESS)
+        g_Log->Info("CRendererVulkan: YUV (NV12) pipeline created");
+    else
+        g_Log->Error("CRendererVulkan: YUV pipeline creation failed: %d", (int)result);
+
+    return result == VK_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
 // Command pool + buffers
 // ---------------------------------------------------------------------------
 bool CRendererVulkan::createCommandPool()
@@ -878,6 +1034,8 @@ bool CRendererVulkan::Initialize(spCDisplayOutput _spDisplay)
     if (!createCommandBuffers())                     return false;
     if (!createWhiteTexture())                       return false;
     if (!createPipeline())                           return false;
+    if (!createYuvDescriptorSetLayout())             return false;
+    if (!createYuvPipeline())                        return false;
     if (!createSyncObjects())                        return false;
     if (!createVertexBuffers())                      return false;
 
@@ -1087,6 +1245,7 @@ bool CRendererVulkan::BeginFrame()
 
     // Bind pipeline + set viewport/scissor
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    m_activePipeline = m_pipeline;
 
     VkViewport vp{};
     vp.width    = static_cast<float>(m_swapExtent.width);
@@ -1201,10 +1360,19 @@ void CRendererVulkan::DrawQuad(const Base::Math::CRect& _rect,
               _rect.m_X0, _rect.m_Y0, _rect.m_X1, _rect.m_Y1,
               _uvRect.m_X0, _uvRect.m_Y0, _uvRect.m_X1, _uvRect.m_Y1);
 
+    // Switch pipeline if needed (RGBA ↔ YUV NV12)
+    VkPipeline       wantPipeline = m_yuvMode ? m_yuvPipeline : m_pipeline;
+    VkPipelineLayout wantLayout   = m_yuvMode ? m_yuvPipelineLayout : m_pipelineLayout;
+    if (wantPipeline != m_activePipeline)
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wantPipeline);
+        m_activePipeline = wantPipeline;
+    }
+
     // Determine descriptor set: use currently selected texture or white
     VkDescriptorSet ds = m_currentDescSet ? m_currentDescSet : m_whiteDescSet;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             m_pipelineLayout, 0, 1, &ds, 0, nullptr);
+                             wantLayout, 0, 1, &ds, 0, nullptr);
 
     // Push constants
     VkPushConstants pc{};
@@ -1212,7 +1380,7 @@ void CRendererVulkan::DrawQuad(const Base::Math::CRect& _rect,
     pc.screenHeight = static_cast<float>(m_swapExtent.height);
     pc.r = _color.m_X; pc.g = _color.m_Y;
     pc.b = _color.m_Z; pc.a = _color.m_W;
-    vkCmdPushConstants(cmd, m_pipelineLayout,
+    vkCmdPushConstants(cmd, wantLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(pc), &pc);
 

@@ -32,7 +32,7 @@
 // #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/json.hpp>
-#include <boost/filesystem/operations.hpp>
+#include <filesystem>
 
 #include <math.h>
 #include <time.h>
@@ -73,7 +73,7 @@
 #include "EDreamClient.h"
 #include "PlatformUtils.h"
 
-using path = boost::filesystem::path;
+using path = std::filesystem::path;
 
 namespace ContentDownloader
 {

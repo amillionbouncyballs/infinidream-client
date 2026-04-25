@@ -185,9 +185,6 @@ class CContentDecoder
     
     bool IsDownloadComplete() const;
     void FinalizeCacheFile();
-    
-    // Static mutex to ensure atomic file renaming across all instances
-    static std::mutex s_RenameMutex;
 };
 
 MakeSmartPointers(CContentDecoder);

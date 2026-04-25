@@ -122,9 +122,17 @@ if(GLSLC)
         DEPENDS ${SHADER_SRC_DIR}/quad.frag
         COMMENT "Compiling quad.frag → SPIR-V"
     )
+    add_custom_command(
+        OUTPUT  ${SHADER_OUT_DIR}/quad_yuv.frag.spv
+        COMMAND ${GLSLC} -o ${SHADER_OUT_DIR}/quad_yuv.frag.spv
+                         ${SHADER_SRC_DIR}/quad_yuv.frag
+        DEPENDS ${SHADER_SRC_DIR}/quad_yuv.frag
+        COMMENT "Compiling quad_yuv.frag → SPIR-V"
+    )
     add_custom_target(compile_shaders ALL DEPENDS
         ${SHADER_OUT_DIR}/quad.vert.spv
         ${SHADER_OUT_DIR}/quad.frag.spv
+        ${SHADER_OUT_DIR}/quad_yuv.frag.spv
     )
 else()
     message(WARNING "glslc not found. Shaders will not be compiled automatically.")
@@ -165,6 +173,7 @@ set(SOURCES
     ${COMMON}/Exception.cpp
     ${COMMON}/Log.cpp
     ${COMMON}/pool.cpp
+    ${COMMON}/SecureStorage.cpp
     ${MATH}/Rect.cpp
 
     # Display output — base

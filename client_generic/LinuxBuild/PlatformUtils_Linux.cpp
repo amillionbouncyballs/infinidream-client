@@ -6,6 +6,10 @@
 #include "PlatformUtils.h"
 #include "PlatformUtils_Internal.h"
 #include "Log.h"
+#include "clientversion.h"
+#include <boost/json.hpp>
+#include <atomic>
+#include <curl/curl.h>
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -21,13 +25,17 @@
 #include <openssl/md5.h>
 #include <pthread.h>
 #include <queue>
+#include <spawn.h>
 #include <sstream>
 #include <string>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+
+extern char** environ;
 
 // ---------------------------------------------------------------------------
 // Internet reachability — try a non-blocking connect to 8.8.8.8:53
@@ -63,7 +71,6 @@ bool PlatformUtils::IsInternetReachable()
 // ---------------------------------------------------------------------------
 static std::string ReadBuildDataValue(const std::string& key)
 {
-    // Try next to the executable first, then CWD
     std::string exePath = PlatformUtils::GetAppPath();
     auto pos = exePath.rfind('/');
     std::string dir = (pos != std::string::npos) ? exePath.substr(0, pos + 1) : "./";
@@ -77,24 +84,21 @@ static std::string ReadBuildDataValue(const std::string& key)
     std::string content((std::istreambuf_iterator<char>(f)),
                          std::istreambuf_iterator<char>());
 
-    // Minimal JSON key lookup: "KEY":"VALUE"
-    std::string search = "\"" + key + "\"";
-    auto it = content.find(search);
-    if (it == std::string::npos)
+    try
+    {
+        auto val = boost::json::parse(content);
+        if (!val.is_object())
+            return "";
+        const auto& obj = val.as_object();
+        auto it = obj.find(key);
+        if (it == obj.end() || !it->value().is_string())
+            return "";
+        return std::string(it->value().as_string());
+    }
+    catch (...)
+    {
         return "";
-    it += search.size();
-
-    // Skip whitespace and colon
-    while (it < content.size() && (content[it] == ' ' || content[it] == ':'))
-        ++it;
-    if (it >= content.size() || content[it] != '"')
-        return "";
-    ++it; // skip opening quote
-
-    std::string value;
-    while (it < content.size() && content[it] != '"')
-        value += content[it++];
-    return value;
+    }
 }
 
 std::string PlatformUtils::GetBuildDate()   { return ReadBuildDataValue("BUILD_DATE"); }
@@ -132,10 +136,12 @@ std::string PlatformUtils::GetWorkingDir()
 // ---------------------------------------------------------------------------
 void PlatformUtils::OpenURLExternally(std::string_view _url)
 {
-    std::string cmd = "xdg-open '";
-    cmd += _url;
-    cmd += "' &";
-    (void)system(cmd.c_str());
+    std::string url(_url);
+    const char* args[] = { "xdg-open", url.c_str(), nullptr };
+    pid_t pid;
+    if (posix_spawnp(&pid, "xdg-open", nullptr, nullptr,
+                     const_cast<char* const*>(args), environ) == 0)
+        waitpid(pid, nullptr, WNOHANG); // reap without blocking
 }
 
 static bool s_cursorHidden = false;
@@ -256,4 +262,89 @@ void CDelayedDispatch::DispatchAfter(uint64_t seconds)
         if (m_DispatchTime == dispatchTime)
             PlatformUtils::DispatchOnMainThread(m_Func);
     }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// Linux auto-update: fetch the Sparkle appcast and compare versions.
+// ---------------------------------------------------------------------------
+static std::atomic<bool> s_updateAvailable{false};
+
+bool ESScreensaver_IsUpdateAvailable(void)
+{
+    return s_updateAvailable.load();
+}
+
+static size_t AppcastWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata)
+{
+    auto* buf = static_cast<std::string*>(userdata);
+    buf->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+// Returns {major, minor, patch} parsed from "X.Y.Z" (or {0,0,0} on failure).
+static std::tuple<int,int,int> ParseVersion(const std::string& v)
+{
+    int ma = 0, mi = 0, pa = 0;
+    sscanf(v.c_str(), "%d.%d.%d", &ma, &mi, &pa);
+    return {ma, mi, pa};
+}
+
+static void RunUpdateCheck()
+{
+    const std::string appcastUrl =
+        "https://infinidream.ai/alpha/appcast.xml";
+
+    CURL* curl = curl_easy_init();
+    if (!curl)
+        return;
+
+    std::string body;
+    curl_easy_setopt(curl, CURLOPT_URL, appcastUrl.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, AppcastWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK)
+    {
+        g_Log->Info("Update check failed: %s", curl_easy_strerror(res));
+        return;
+    }
+
+    // Extract <sparkle:shortVersionString>X.Y.Z</sparkle:shortVersionString>
+    const std::string tag = "<sparkle:shortVersionString>";
+    auto pos = body.find(tag);
+    if (pos == std::string::npos)
+        return;
+    pos += tag.size();
+    auto end = body.find('<', pos);
+    if (end == std::string::npos)
+        return;
+    std::string remoteVer = body.substr(pos, end - pos);
+
+    const std::string localVer = std::string(VER_MAJOR) + "." + VER_MINOR + "." + VER_BUILD;
+    auto [rMa, rMi, rPa] = ParseVersion(remoteVer);
+    auto [lMa, lMi, lPa] = ParseVersion(localVer);
+
+    bool newer = std::tie(rMa, rMi, rPa) > std::tie(lMa, lMi, lPa);
+    if (newer)
+    {
+        g_Log->Info("Update available: local=%s remote=%s",
+                    localVer.c_str(), remoteVer.c_str());
+        s_updateAvailable.store(true);
+    }
+    else
+    {
+        g_Log->Info("Up to date (local=%s remote=%s)",
+                    localVer.c_str(), remoteVer.c_str());
+    }
+}
+
+void ESLinux_StartUpdateCheck(void)
+{
+    std::thread(RunUpdateCheck).detach();
 }

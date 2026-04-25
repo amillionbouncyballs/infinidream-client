@@ -21,7 +21,6 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 
-#include <boost/filesystem.hpp> // TODO: We need to unify to std::fs someday
 #include <string>
 #include <sys/stat.h>
 #if defined(_WIN32) || defined(_WIN64)
@@ -40,14 +39,11 @@
 #include "PathManager.h"
 #include "EDreamClient.h"
 
-using namespace boost;
 namespace fs = std::filesystem;
 
 namespace ContentDecoder
 {
 
-// Static mutex definition
-std::mutex CContentDecoder::s_RenameMutex;
 
 #ifdef LINUX_GNU
 // Prefer AV_PIX_FMT_VAAPI when the codec offers it; otherwise take the first
@@ -324,7 +320,7 @@ bool CContentDecoder::Open()
         }
     } else if (codecPar->codec_id == AV_CODEC_ID_HEVC) {
         const AVBitStreamFilter* bsf = av_bsf_get_by_name("hevc_mp4toannexb");
-        
+
         if (!bsf)
         {
             g_Log->Error("FFmpeg error: av_bsf_get_by_name() failed");
@@ -341,10 +337,14 @@ bool CContentDecoder::Open()
             g_Log->Error("FFmpeg error: av_bsf_init() failed");
             return false;
         }
-        
+    } else if (codecPar->codec_id == AV_CODEC_ID_VP9 ||
+               codecPar->codec_id == AV_CODEC_ID_AV1) {
+        // VP9 and AV1 are self-contained; no bitstream filter needed.
+        // ovi->m_pBsfContext remains nullptr — decoder reads packets directly.
+        const char* name = (codecPar->codec_id == AV_CODEC_ID_AV1) ? "AV1" : "VP9";
+        g_Log->Info("ContentDecoder: using %s codec (no BSF required)", name);
     } else {
-        printf("unknown codec?");
-        g_Log->Error("unknown codec? ");
+        g_Log->Error("ContentDecoder: unsupported codec id %d", static_cast<int>(codecPar->codec_id));
         return false;
     }
 #ifdef LINUX_GNU
@@ -747,6 +747,14 @@ CVideoFrame* CContentDecoder::ReadOneFrame()
             pVideoFrame = new CVideoFrame(pFrame, frameNumber,
                                           frameSource);
         }
+        else if (pFrame &&
+                 static_cast<AVPixelFormat>(pFrame->format) == m_WantedPixelFormat)
+        {
+            // Decoder output already matches wanted format (e.g. NV12→NV12):
+            // hand the AVFrame directly to CVideoFrame via av_frame_ref — no sws_scale.
+            const std::string frameSource = ovi ? ovi->m_Path : std::string();
+            pVideoFrame = new CVideoFrame(pFrame, frameNumber, frameSource);
+        }
         else
         {
             const int srcWidth = (pFrame && pFrame->width > 0) ? pFrame->width : pVideoCodecContext->width;
@@ -904,7 +912,7 @@ void CContentDecoder::ReadFramesThread()
                 return;
             }
 
-            this_thread::interruption_point();
+            boost::this_thread::interruption_point();
             
             PROFILER_BEGIN("Main Video Decoder Frame");
             
@@ -1021,7 +1029,7 @@ void CContentDecoder::ReadFramesThread()
 
         g_Log->Info("Ending main video frame reading thread for %s", m_Metadata.dreamData.uuid.c_str());
     }
-    catch (thread_interrupted const&)
+    catch (boost::thread_interrupted const&)
     {
         g_Log->Info("Thread Interrupted: Ending main video frame reading thread for %s", m_Metadata.dreamData.uuid.c_str());
 
@@ -1083,7 +1091,7 @@ bool CContentDecoder::Start(const sClipMetadata& metadata, int64_t _seekFrame)
     //	Start by opening, so we have a context to work with.
     m_bStop = false;
     m_pDecoderThread =
-    new thread(bind(&CContentDecoder::ReadFramesThread, this));
+    new boost::thread(boost::bind(&CContentDecoder::ReadFramesThread, this));
     
     return true;
 }
@@ -1298,33 +1306,26 @@ void CContentDecoder::FinalizeCacheFile()
         try
         {
             if (fs::exists(tmpPath)) {
-                // Use static mutex to ensure atomic rename operation across all threads
-                std::lock_guard<std::mutex> renameLock(s_RenameMutex);
-                
-                if (!fs::exists(finalPath)) {
-                    fs::rename(tmpPath, finalPath);
-                    g_Log->Info("Successfully renamed cache file from %s to %s", tmpPath.string().c_str(), finalPath.string().c_str());
-                    m_CachePath.clear();  // Clear the cache path to indicate we've finalized
-                    
-                    // Now we let our cache know the file is there
-                    Cache::CacheManager::DiskCachedItem newDiskItem;
-                    newDiskItem.uuid = m_Metadata.dreamData.uuid;
-                    newDiskItem.version = m_Metadata.dreamData.video_timestamp;
-                    newDiskItem.downloadDate = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                // rename(2) on POSIX is atomic and replaces any existing destination,
+                // so no mutex is needed — two decoders racing on the same UUID both
+                // produce identical content and the last writer wins harmlessly.
+                fs::rename(tmpPath, finalPath);
+                g_Log->Info("Successfully renamed cache file from %s to %s", tmpPath.string().c_str(), finalPath.string().c_str());
+                m_CachePath.clear();
 
-                    Cache::CacheManager& cm = Cache::CacheManager::getInstance();
-                    cm.addDiskCachedItem(newDiskItem);
-                } else {
-                    g_Log->Info("Final file %s already exists, removing temporary file %s", 
-                                finalPath.string().c_str(), tmpPath.string().c_str());
-                    fs::remove(tmpPath);
-                    m_CachePath.clear();
-                }
+                Cache::CacheManager::DiskCachedItem newDiskItem;
+                newDiskItem.uuid = m_Metadata.dreamData.uuid;
+                newDiskItem.version = m_Metadata.dreamData.video_timestamp;
+                newDiskItem.downloadDate = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+                Cache::CacheManager& cm = Cache::CacheManager::getInstance();
+                cm.addDiskCachedItem(newDiskItem);
             }
         }
         catch (const fs::filesystem_error& e)
         {
             g_Log->Error("Failed to rename cache file: %s", e.what());
+            try { fs::remove(tmpPath); } catch (...) {}
         }
     }
 }

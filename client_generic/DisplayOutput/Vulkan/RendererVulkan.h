@@ -56,14 +56,25 @@ class CRendererVulkan : public CRenderer
     VkRenderPass               m_renderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> m_framebuffers;
 
-    // Descriptor layout + pool + sampler
+    // Descriptor layout + pool + sampler (RGBA / single-texture path)
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool      m_descriptorPool      = VK_NULL_HANDLE;
     VkSampler             m_defaultSampler      = VK_NULL_HANDLE;
 
-    // Pipeline
+    // Pipeline — RGBA (existing)
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline       m_pipeline       = VK_NULL_HANDLE;
+
+    // Pipeline — NV12 YUV (Y + UV planes, GPU colour-space conversion)
+    VkDescriptorSetLayout m_yuvDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      m_yuvPipelineLayout      = VK_NULL_HANDLE;
+    VkPipeline            m_yuvPipeline            = VK_NULL_HANDLE;
+
+    // Active pipeline tracking (avoids redundant vkCmdBindPipeline calls)
+    VkPipeline m_activePipeline = VK_NULL_HANDLE;
+
+    // True when the current texture is an NV12 frame (set by CTextureFlatVulkan::Bind)
+    bool m_yuvMode = false;
 
     // Command pool + buffers
     VkCommandPool                m_commandPool = VK_NULL_HANDLE;
@@ -119,6 +130,8 @@ class CRendererVulkan : public CRenderer
     bool createDescriptorPool();
     bool createSampler();
     bool createPipeline();
+    bool createYuvDescriptorSetLayout();
+    bool createYuvPipeline();
     bool createCommandPool();
     bool createCommandBuffers();
     bool createSyncObjects();
@@ -174,17 +187,19 @@ class CRendererVulkan : public CRenderer
     VkPhysicalDevice      GetPhysicalDevice()     const { return m_physicalDevice; }
     VkCommandPool         GetCommandPool()        const { return m_commandPool; }
     VkQueue               GetGraphicsQueue()      const { return m_graphicsQueue; }
-    VkDescriptorPool      GetDescriptorPool()     const { return m_descriptorPool; }
-    VkDescriptorSetLayout GetDescriptorSetLayout()const { return m_descriptorSetLayout; }
-    VkSampler             GetDefaultSampler()     const { return m_defaultSampler; }
+    VkDescriptorPool      GetDescriptorPool()        const { return m_descriptorPool; }
+    VkDescriptorSetLayout GetDescriptorSetLayout()   const { return m_descriptorSetLayout; }
+    VkDescriptorSetLayout GetYuvDescriptorSetLayout() const { return m_yuvDescriptorSetLayout; }
+    VkSampler             GetDefaultSampler()        const { return m_defaultSampler; }
     uint32_t  FindMemType(uint32_t filter, VkMemoryPropertyFlags props);
 
     // Single-time command helpers (used by CTextureFlatVulkan for uploads)
     VkCommandBuffer BeginSingleTimeCommands();
     void            EndSingleTimeCommands(VkCommandBuffer cmd);
 
-    // Let the active texture set its descriptor
+    // Let the active texture set its descriptor and YUV mode flag
     void SetDescriptorSet(VkDescriptorSet ds) { m_currentDescSet = ds; }
+    void SetYuvMode(bool yuv) { m_yuvMode = yuv; }
 
     // Swapchain extent — used by CTextImGui::GetExtent() for screen-space normalisation
     VkExtent2D GetSwapExtent() const { return m_swapExtent; }

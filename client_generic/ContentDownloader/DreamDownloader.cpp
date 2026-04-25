@@ -203,10 +203,14 @@ void DreamDownloader::FindDreamsThread() {
             
         }
 
-        //SetDownloadStatus("No dream to download");
-        // Sleep for a while before the next iteration
-        boost::this_thread::sleep(boost::get_system_time() +
-                             boost::posix_time::seconds(10));
+        // Wait up to 30 s before re-checking; WakeDownloadThread() interrupts early
+        // on quota/playlist changes.  boost::thread_interrupted is re-thrown by
+        // the blocking wait if the thread is interrupted during shutdown.
+        {
+            std::unique_lock<std::mutex> lk(m_downloadCVMutex);
+            m_downloadCV.wait_for(lk, std::chrono::seconds(30),
+                                  [this] { return !isRunning.load(); });
+        }
     }
     
     } catch (boost::thread_interrupted&) {
@@ -243,17 +247,6 @@ bool DreamDownloader::DownloadDream(const std::string& uuid, const std::string& 
 
     auto dream = cm.getDream(uuid);
     
-    Network::spCFileDownloader spDownload = std::make_shared<Network::CFileDownloader>("Downloading dream: " + dream->name);
-    Network::NetworkHeaders::addStandardHeaders(spDownload);
-    
-    if (!spDownload->Perform(downloadLink)) {
-        SetDownloadStatus("Download failed for " + dream->name);
-        g_Log->Error("Failed to download dream. Server returned %i: %s",
-                     spDownload->ResponseCode(),
-                     spDownload->Data().c_str());
-        return false;
-    }
-
     try {
         if (!fs::exists(savePath)) {
             fs::create_directories(savePath);
@@ -263,30 +256,32 @@ bool DreamDownloader::DownloadDream(const std::string& uuid, const std::string& 
         return false;
     }
 
-    // Save with .tmp extension first
+    // Stream directly to a .tmp file — avoids buffering the whole video in RAM
     fs::path tmpPath = savePath / (uuid + ".tmp");
     fs::path finalPath = savePath / (uuid + ".mp4");
 
-    if (!spDownload->Save(tmpPath.string())) {
-        g_Log->Error("Failed to save downloaded dream to %s", tmpPath.string().c_str());
+    Network::spCFileDownloader spDownload = std::make_shared<Network::CFileDownloader>("Downloading dream: " + dream->name);
+    Network::NetworkHeaders::addStandardHeaders(spDownload);
+
+    if (!spDownload->PerformToFile(downloadLink, tmpPath.string())) {
+        SetDownloadStatus("Download failed for " + dream->name);
+        g_Log->Error("Failed to download dream to %s (HTTP %i)",
+                     tmpPath.string().c_str(), spDownload->ResponseCode());
+        try { fs::remove(tmpPath); } catch (...) {}
         return false;
     }
 
-    // If we have an MD5 hash in the metadata, verify it
+    // MD5 was computed incrementally during download — no extra file read needed
     if (!dream->md5.empty()) {
-        std::string downloadedMd5 = PlatformUtils::CalculateFileMD5(tmpPath.string());
+        const std::string& downloadedMd5 = spDownload->GetMD5();
         if (downloadedMd5 != dream->md5) {
             g_Log->Error("md5 mismatch for %s. Expected: %s, Got: %s",
                          uuid.c_str(), dream->md5.c_str(), downloadedMd5.c_str());
             EDreamClient::ReportMD5Failure(uuid, downloadedMd5, false);
-            fs::remove(tmpPath);
+            try { fs::remove(tmpPath); } catch (...) {}
             return false;
         }
-        // TODO : remove that from log at some point
-        g_Log->Info(std::string("md5 match ") + dream->md5);
-    } else {
-        // TODO : remove that from log at some point
-        g_Log->Info("No md5 in metadata");
+        g_Log->Info("md5 match for %s", uuid.c_str());
     }
 
     // Rename tmp to mp4
@@ -294,6 +289,7 @@ bool DreamDownloader::DownloadDream(const std::string& uuid, const std::string& 
         fs::rename(tmpPath, finalPath);
     } catch (const fs::filesystem_error& e) {
         g_Log->Error("Failed to rename tmp file to mp4: %s", e.what());
+        try { fs::remove(tmpPath); } catch (...) {}
         return false;
     }
 

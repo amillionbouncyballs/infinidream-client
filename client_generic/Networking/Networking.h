@@ -2,7 +2,9 @@
 #define _NETWORKING_H_
 
 #include <map>
+#include <string>
 #include <vector>
+#include <openssl/md5.h>
 
 #ifdef WIN32
 #pragma comment(lib, "wldap32.lib")
@@ -81,7 +83,16 @@ class CFileDownloader : public CCurlTransfer
 {
     std::string m_Data;
     std::multimap<std::string, std::string> m_ResponseHeaders;
-    
+
+    // State used by PerformToFile (streams directly to disk)
+    FILE*       m_pOutFile    = nullptr;
+    static int32_t writeToFile(void* buf, size_t size, size_t nmemb, void* userdata);
+
+    // Incremental MD5 accumulated during PerformToFile
+    MD5_CTX     m_md5Ctx{};
+    bool        m_md5Active  = false;
+    std::string m_md5Hex;
+
   public:
     static int32_t customWrite(void* _pBuffer, size_t _size, size_t _nmemb,
                                void* _pUserData);
@@ -91,10 +102,19 @@ class CFileDownloader : public CCurlTransfer
 
     bool SetPostFields(const char* postFields);
     virtual bool Perform(const std::string& _url);
+
+    // Download directly to a file without buffering the whole body in RAM.
+    // Returns false if the HTTP request or file write fails.
+    // After a successful call, GetMD5() returns the hex-encoded MD5 of the data written.
+    bool PerformToFile(const std::string& _url, const std::string& _destPath);
+
+    // Returns the hex MD5 computed during the last PerformToFile call.
+    std::string GetMD5() const { return m_md5Hex; }
+
     bool Save(const std::string& _output);
 
     const std::string& Data() { return m_Data; };
-    
+
     std::string GetResponseHeader(const std::string& headerName) const;
     std::vector<std::string> GetResponseHeaders(const std::string& headerName) const;
     static size_t headerCallback(char* buffer, size_t size, size_t nitems, void* userdata);

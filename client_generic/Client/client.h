@@ -23,6 +23,7 @@
 #include "Player.h"
 #include "Clip.h"
 #include "Settings.h"
+#include "SecureStorage.h"
 #include "base.h"
 #include "clientversion.h"
 #include "storage.h"
@@ -64,9 +65,14 @@ static std::atomic<bool> s_shutdownCancelled{false};
 #define FULLSCREEN_MODIFIER_KEY "Command"
 // Sparkle update availability check (Mac only)
 extern bool ESScreensaver_IsUpdateAvailable(void);
+#elif defined(LINUX_GNU)
+#define FULLSCREEN_MODIFIER_KEY "Control"
+// Linux: background appcast version check
+extern bool ESScreensaver_IsUpdateAvailable(void);
+extern void ESLinux_StartUpdateCheck(void);
 #else
 #define FULLSCREEN_MODIFIER_KEY "Control"
-// Non-Mac platforms don't have Sparkle
+// Non-Mac/Linux platforms don't have an updater
 inline bool ESScreensaver_IsUpdateAvailable(void) { return false; }
 #endif
 
@@ -860,7 +866,7 @@ class CElectricSheep
         }
         else
         {
-            std::string sealedSession = g_Settings()->Get("settings.content.sealed_session", std::string(""));
+            std::string sealedSession = SecureStorage::Get("settings.content.sealed_session");
             if (sealedSession.empty())
             {
                 // Try to get a sealed session interactively before the window opens.
@@ -869,7 +875,7 @@ class CElectricSheep
                     // Magic link not available (no credentials file, no tty, or user declined).
                     // Fall back to API key if one is configured.
                     const char* envKey = getenv("INFINIDREAM_API_KEY");
-                    std::string storedKey = g_Settings()->Get("settings.content.api_key", std::string(""));
+                    std::string storedKey = SecureStorage::Get("settings.content.api_key");
                     if (!((envKey && *envKey) || !storedKey.empty()))
                     {
                         fprintf(stderr,
@@ -1007,6 +1013,12 @@ class CElectricSheep
         RefreshFastDiagnostics(m_LastCPUCheckTime, true);
         RefreshSlowDiagnostics(m_LastCPUCheckTime, true);
         RefreshCacheDiagnostics(m_LastCPUCheckTime, true);
+
+#ifdef LINUX_GNU
+        if (internetReachable)
+            ESLinux_StartUpdateCheck();
+#endif
+
         return true;
     }
 

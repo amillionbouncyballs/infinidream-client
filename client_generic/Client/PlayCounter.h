@@ -6,7 +6,7 @@
 #ifndef _PLAYCOUNTER_H
 #define _PLAYCOUNTER_H
 
-#include <boost/filesystem/path.hpp>
+#include <filesystem>
 #include <boost/scoped_ptr.hpp>
 
 #include "Settings.h"
@@ -20,7 +20,7 @@ static const uint32_t gl_sMaxGeneration = 100000;
 #define n_dirty_bits (1 + (max_sheep >> log_count_size))
 #define play_write_rate 10
 
-using boost::filesystem::path;
+using std::filesystem::path;
 
 struct sPlayCountData
 {

@@ -65,10 +65,9 @@ m_CurrentFrameMetadata{}, m_HasFinished(false), m_IsFadingOut(false)
 
 #else
 
-    AVPixelFormat pf = AV_PIX_FMT_RGBA;
-#if defined(__BIG_ENDIAN__)
-    pf = AV_PIX_FMT_RGBA;  // RGBA is byte-order agnostic for our purposes
-#endif
+    // NV12: decoder outputs Y+UV planes that the Vulkan fragment shader converts
+    // to RGB directly on the GPU, avoiding a CPU sws_scale pass per frame.
+    AVPixelFormat pf = AV_PIX_FMT_NV12;
 
 #endif
     m_spDecoder = std::make_shared<CContentDecoder>(

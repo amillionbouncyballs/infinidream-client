@@ -45,14 +45,7 @@
 #include "PlatformUtils.h"
 #include "EDreamClient.h"
 
-/*
-#include "boost/filesystem/convenience.hpp"
-#include "boost/filesystem/operations.hpp"
-#include "boost/filesystem/path.hpp" */
-
-#include <boost/filesystem.hpp>
-
-#include "boost/filesystem.hpp"
+#include <filesystem>
 #if defined(MAC) || defined(WIN32)
 #define HONOR_VBL_SYNC
 #endif
@@ -72,10 +65,10 @@ PrintQueue(std::string_view _str,
            const std::vector<ContentDecoder::spCClip>& _currentClips);
 
 
-using boost::filesystem::directory_iterator;
-using boost::filesystem::exists;
-//using boost::filesystem::extension;
-using boost::filesystem::path;
+namespace fs = std::filesystem;
+using fs::directory_iterator;
+using fs::exists;
+using fs::path;
 
 using namespace DisplayOutput;
 

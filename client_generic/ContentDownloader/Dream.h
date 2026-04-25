@@ -48,7 +48,9 @@ struct Dream {
     }
 
     double getDuration() const {
-        return frames / getFps();
+        double f = getFps();
+        if (f <= 0.0 || frames <= 0) return 0.0;
+        return frames / f;
     }
 
     std::string getFormattedSize() const {

@@ -13,6 +13,7 @@
 #include <boost/asio.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/json.hpp>
+#include <boost/thread/thread.hpp>
 #include "Networking.h"
 #include "PlaylistManager.h"
 
@@ -48,6 +49,7 @@ class EDreamClient
     static std::atomic<bool> fAuthRetryAbort;
     static std::atomic<bool> fAuthRetryPending;
     static std::atomic<bool> fInitialAuthComplete;  // true once first auth refresh attempt has finished
+    static boost::thread s_authThread;
     static std::atomic<int> fCpuUsage;
     static std::mutex fAuthMutex;
     static std::condition_variable fAuthCV;

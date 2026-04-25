@@ -312,6 +312,12 @@ bool CCurlTransfer::Perform(const std::string& _url)
     if (!Verify(curl_easy_setopt(m_pCurl, CURLOPT_NOSIGNAL, 1L)))
         return false;
 
+    // Timeouts: 15 s to connect, 120 s for the whole transfer
+    if (!Verify(curl_easy_setopt(m_pCurl, CURLOPT_CONNECTTIMEOUT, 15L)))
+        return false;
+    if (!Verify(curl_easy_setopt(m_pCurl, CURLOPT_TIMEOUT, 120L)))
+        return false;
+
     if (!Verify(curl_easy_setopt(m_pCurl, CURLOPT_HTTPHEADER, m_Headers)))
         return false;
 
@@ -339,9 +345,9 @@ bool CCurlTransfer::Perform(const std::string& _url)
     if (!Verify(
             curl_easy_getinfo(m_pCurl, CURLINFO_RESPONSE_CODE, &m_HttpCode)))
         return false;
-    if (m_HttpCode != 200)
+    if (m_HttpCode < 200 || m_HttpCode >= 300)
     {
-        //	Check if the response code is allowed.
+        //	Check if the response code is explicitly allowed by the caller.
         std::vector<uint32_t>::const_iterator it = std::find(
             m_AllowedResponses.begin(), m_AllowedResponses.end(), m_HttpCode);
         if (it == m_AllowedResponses.end())
@@ -354,22 +360,17 @@ bool CCurlTransfer::Perform(const std::string& _url)
             case 401:
                 Status("Authentication failed\n");
                 break;
-
             case 404:
                 Status("File not found on server\n");
                 break;
-
             default:
             {
                 std::stringstream st;
                 st << "Invalid server response [" << m_HttpCode << "]\n";
-
                 Status(st.str());
             }
             break;
             }
-
-            //	Todo, (or not) print the remaining ones :)
             return false;
         }
     }

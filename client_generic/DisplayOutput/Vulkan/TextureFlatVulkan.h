@@ -2,8 +2,10 @@
 #define _TEXTUREFLATVULKAN_H_
 
 #include "TextureFlat.h"
-#include <vulkan/vulkan.h>
+#include <atomic>
 #include <cstdint>
+#include <vector>
+#include <vulkan/vulkan.h>
 
 // Forward declaration to avoid circular include
 namespace DisplayOutput { class CRendererVulkan; }
@@ -31,6 +33,9 @@ class CTextureFlatVulkan : public CTextureFlat
     uint32_t m_imgHeight = 0;
     bool     m_dirty     = false;
 
+    // Reusable scratch buffer for swscale YUV→RGBA conversion (avoids per-frame heap alloc)
+    std::vector<uint8_t> m_swscaleBuf;
+
     // Staging buffer (re-used across uploads to the same texture)
     VkBuffer       m_stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_stagingMem    = VK_NULL_HANDLE;
@@ -39,12 +44,25 @@ class CTextureFlatVulkan : public CTextureFlat
     // Persistent upload command buffer + fence for async uploads.
     // The fence signals when the GPU has finished consuming the staging buffer,
     // so we can safely overwrite it with new frame data on the next upload.
-    VkCommandBuffer m_uploadCmdBuffer = VK_NULL_HANDLE;
-    VkFence         m_copyFence       = VK_NULL_HANDLE;
-    bool            m_copyPending     = false;
+    VkCommandBuffer      m_uploadCmdBuffer = VK_NULL_HANDLE;
+    VkFence              m_copyFence       = VK_NULL_HANDLE;
+    std::atomic<bool>    m_copyPending{false};
+
+    // NV12 YUV planes (GPU-side colour conversion path)
+    VkImage         m_yPlane    = VK_NULL_HANDLE;
+    VkDeviceMemory  m_yPlaneMem = VK_NULL_HANDLE;
+    VkImageView     m_yView     = VK_NULL_HANDLE;
+    VkImage         m_uvPlane    = VK_NULL_HANDLE;
+    VkDeviceMemory  m_uvPlaneMem = VK_NULL_HANDLE;
+    VkImageView     m_uvView     = VK_NULL_HANDLE;
+    VkDescriptorSet m_yuvDescSet = VK_NULL_HANDLE;
+    bool            m_isYuv      = false;
 
     bool allocStaging(VkDeviceSize size);
     bool uploadToImage(uint32_t w, uint32_t h);
+    bool BindFrameNV12(const uint8_t* yPlane, uint32_t yStride,
+                       const uint8_t* uvPlane, uint32_t uvStride,
+                       uint32_t w, uint32_t h);
 
   public:
     CTextureFlatVulkan(CRendererVulkan* renderer, const uint32_t flags);

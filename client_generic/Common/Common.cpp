@@ -5,15 +5,15 @@
 #endif
 
 #include "Log.h"
-#include <boost/filesystem.hpp>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
 
+namespace fs = std::filesystem;
+
 namespace Base
 {
-
-using namespace boost::filesystem;
 
 bool GetFileList(std::vector<std::string>& _list, const std::string _dir,
                  const std::string _extension, const bool _usegoldsheep,
@@ -22,47 +22,39 @@ bool GetFileList(std::vector<std::string>& _list, const std::string _dir,
     bool gotSheep = false;
     try
     {
-        boost::filesystem::path p(_dir);
+        fs::path p(_dir);
 
-        directory_iterator end_itr; // default construction yields past-the-end
-        for (directory_iterator itr(p); itr != end_itr; ++itr)
+        for (const auto& entry : fs::directory_iterator(p))
         {
-            std::string dirname(itr->path().filename().string());
-            if (is_directory(itr->status()))
+            if (entry.is_directory())
             {
                 gotSheep |= GetFileList(
-                    _list, (itr->path().string() + std::string("/")),
+                    _list, entry.path().string() + "/",
                     _extension, _usegoldsheep, _usefreesheep, _scanProps);
             }
             else
             {
-                std::string fname(itr->path().filename().string());
-                std::string ext(itr->path().extension().string());
+                std::string fname = entry.path().filename().string();
+                std::string ext   = entry.path().extension().string();
 
                 if (ext == _extension)
                 {
                     if (_scanProps)
                     {
-                        int generation;
-                        int id;
-                        int first;
-                        int last;
-
-                        if (4 ==
-                            sscanf(fname.c_str(),
-                                   (std::string("%d=%d=%d=%d.") + _extension)
-                                       .c_str(),
-                                   &generation, &id, &first, &last))
+                        int generation, id, first, last;
+                        if (4 == sscanf(fname.c_str(),
+                                        (std::string("%d=%d=%d=%d.") + _extension).c_str(),
+                                        &generation, &id, &first, &last))
                         {
                             std::string xxxname(fname);
                             xxxname.replace(fname.size() - 3, 3, "xxx");
 
-                            if (!exists(p / xxxname)) // is it deleted?
+                            if (!fs::exists(p / xxxname))
                             {
                                 if ((_usegoldsheep && generation >= 10000) ||
                                     (_usefreesheep && generation < 10000))
                                 {
-                                    _list.push_back(itr->path().string());
+                                    _list.push_back(entry.path().string());
                                     gotSheep = true;
                                 }
                             }
@@ -70,14 +62,14 @@ bool GetFileList(std::vector<std::string>& _list, const std::string _dir,
                     }
                     else
                     {
-                        _list.push_back(itr->path().string());
+                        _list.push_back(entry.path().string());
                         gotSheep = true;
                     }
                 }
             }
         }
     }
-    catch (boost::filesystem::filesystem_error& err)
+    catch (fs::filesystem_error& err)
     {
         g_Log->Error("Path enumeration threw error: %s", err.what());
     }

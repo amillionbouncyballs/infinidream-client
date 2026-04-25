@@ -9,6 +9,8 @@
 #define PlatformUtils_h
 
 #include "SmartPtr.h"
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <functional>
@@ -51,7 +53,7 @@ class PlatformUtils
 
 class CDelayedDispatch
 {
-    uint64_t m_DispatchTime;
+    std::atomic<uint64_t> m_DispatchTime{0};
     std::function<void()> m_Func;
 
 #ifdef WIN32
