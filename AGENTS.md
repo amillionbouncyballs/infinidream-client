@@ -111,6 +111,12 @@ CClip::Update()                       [render thread]
 - Code signing auto-discovers Developer ID from Keychain (macOS)
 - Auto-update via Sparkle appcast XML (macOS)
 
+## Runtime Logs
+
+Runtime logs are written to one file per day (`YYYY_MM_DD.log`) in:
+- **macOS:** `/Users/Shared/infinidream.ai/Logs/`
+- **Windows:** `C:\ProgramData\Infinidream\Logs\`
+
 ## Deployment
 
 GitHub releases as `infinidream-X.Y.Z.zip`. Appcast URLs:

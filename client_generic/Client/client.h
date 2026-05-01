@@ -43,6 +43,11 @@
 #include "Timer.h"
 #include "StringFormat.h"
 
+#if defined(WIN32)
+#include "FirstTimeSetupWin32.h"
+#include "SettingsDialogWin32.h"
+#endif
+
 #include "PlatformUtils.h"
 #include "CacheManager.h"
 
@@ -393,7 +398,8 @@ class CElectricSheep
             BK("F1") ": Help (this page)\t\t\t\t" BK("F2") ": Status overlay\n\n"
 
             BK(FULLSCREEN_MODIFIER_KEY "-R") ": Open remote control\n"
-            BK(FULLSCREEN_MODIFIER_KEY "-B") ": Browse playlists",
+            BK(FULLSCREEN_MODIFIER_KEY "-B") ": Browse playlists\n"
+            BK(FULLSCREEN_MODIFIER_KEY "-,") ": Open settings",
             ""));
 #undef BK
 
@@ -2268,15 +2274,14 @@ class CElectricSheep
                 // Update GPU usage display (Metal frame time + system GPU %)
                 {
                     float gpuMs = m_RuntimeDiagnostics.gpuFrameTimeMs;
-                    float gpuPct = m_RuntimeDiagnostics.gpuUtilization;
                     std::string sysGpu =
                         (m_RuntimeDiagnostics.gpuUsage >= 0)
-                            ? string_format(", %i%%", m_RuntimeDiagnostics.gpuUsage)
+                            ? string_format(", %i%% app", m_RuntimeDiagnostics.gpuUsage)
                             : "";
                     if (gpuMs >= 0)
                         ((Hud::CStringStat*)spStats->Get("zzagpu2"))
-                            ->SetSample(string_format("%.2fms (%.0f%%)%s total",
-                                gpuMs, gpuPct, sysGpu.c_str()));
+                            ->SetSample(string_format("%.2fms%s",
+                                gpuMs, sysGpu.c_str()));
                     else
                         ((Hud::CStringStat*)spStats->Get("zzagpu2"))
                             ->SetSample("n/a");
@@ -2722,6 +2727,12 @@ class CElectricSheep
     {
         if (_event->Type() == DisplayOutput::CEvent::Event_KEY)
         {
+#if defined(WIN32)
+            // While an ImGui overlay (Settings / first-run wizard) is active, it owns keyboard focus.
+            // Swallow player hotkeys so typing into text fields doesn't trigger playback actions.
+            if (SettingsDialogWin32_HasPendingOrVisible() || FirstTimeSetupWin32_IsWizardVisible())
+                return true;
+#endif
             DisplayOutput::spCKeyEvent spKey =
                 std::dynamic_pointer_cast<DisplayOutput::CKeyEvent>(_event);
             if (!spKey->m_bPressed) return true;  // ignore key-release events

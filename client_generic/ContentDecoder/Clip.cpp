@@ -15,6 +15,10 @@
 #include "FrameGeneration/FrameGenerationMode.h"
 #include "FrameGeneration/RifeInterpolatorNcnn.h"
 
+#ifdef WIN32
+#include "../DisplayOutput/D3D11/RendererDX11.h"
+#endif
+
 namespace ContentDecoder
 {
 
@@ -112,6 +116,19 @@ m_CurrentFrameMetadata{}, m_HasFinished(false), m_IsFadingOut(false)
     m_spImageRef = std::make_shared<DisplayOutput::CImage>();
     m_spFrameGeneration = std::make_unique<FrameGeneration::CFrameGenerationScheduler>();
     m_PresentationFps = m_ClipMetadata.decodeFps;
+
+#ifdef WIN32
+    // Pass the renderer's ID3D11Device to the decoder so FFmpeg D3D11VA
+    // shares the same device and decoded frames can be sampled GPU-natively.
+    if (m_spRenderer)
+    {
+        auto* rendererDX11 = dynamic_cast<DisplayOutput::CRendererDX11*>(m_spRenderer.get());
+        if (rendererDX11)
+            m_spDecoder->SetD3D11Device(rendererDX11->GetDevice());
+        else
+            g_Log->Warning("CClip: renderer is not CRendererDX11; hw decode will be unavailable");
+    }
+#endif
 
 #ifdef LINUX_GNU
     m_FrameGenerationMode = FrameGeneration::FromSetting(
@@ -750,12 +767,28 @@ bool CClip::UploadFrameToTexture(const spCVideoFrame& frame)
         return false;
 
 #if USE_HW_ACCELERATION && !defined(WIN32)
+    // macOS: VideoToolbox frames arrive as CVPixelBufferRef — always use BindFrame.
     currentTexture->BindFrame(m_spFrameData);
 #else
-    // RGB24 frames have w*h*3 bytes; Upload(spCImage) assumes w*h*4. Route through
-    // BindFrame which already handles RGB24→RGBA expansion.
-    if (m_spFrameData->Frame()->format == AV_PIX_FMT_RGB24)
+    const bool isHWFrame = m_spFrameData->IsHWFrame();
+    if (isHWFrame)
     {
+        // GPU-backed frame (D3D11VA): bind directly — no sws_scale, no CPU→GPU upload.
+        if (!currentTexture->BindFrame(m_spFrameData))
+        {
+            static bool s_bindFrameFailLogged = false;
+            if (!s_bindFrameFailLogged)
+            {
+                g_Log->Warning("CClip: BindFrame failed for hw frame; dropping frame "
+                               "(unsupported surface format?)");
+                s_bindFrameFailLogged = true;
+            }
+        }
+    }
+    else if (m_spFrameData->Frame()->format == AV_PIX_FMT_RGB24)
+    {
+        // RGB24 frames have w*h*3 bytes; Upload(spCImage) assumes w*h*4. Route through
+        // BindFrame which handles RGB24→RGBA expansion via sws_scale.
         currentTexture->BindFrame(m_spFrameData);
     }
     else
