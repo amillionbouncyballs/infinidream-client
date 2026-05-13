@@ -337,11 +337,11 @@ class CElectricSheep
     void SetCachedOnlyMode(bool val) {
         m_CachedOnlyMode = val;
     }
-    
+
     void SetFrameGenerationOverrideMode(FrameGeneration::EFrameGenerationMode mode) {
         m_FrameGenerationOverrideMode = mode;
     }
-    
+
     virtual void SetIsPreview(bool _isPreview) {
         m_bIsPreview = _isPreview;
     }
@@ -612,7 +612,7 @@ class CElectricSheep
         m_RuntimeDiagnostics.websocketConnected =
             m_RuntimeDiagnostics.internetConnected &&
             EDreamClient::IsWebSocketConnected();
-        m_RuntimeDiagnostics.nextConnectivityUpdateTime = now + 3.0;
+        m_RuntimeDiagnostics.nextConnectivityUpdateTime = now + 0.5;
     }
 
     void RefreshFastDiagnostics(double now, bool force = false)
@@ -631,9 +631,6 @@ class CElectricSheep
             g_Player().Renderer()->GetGPUFrameTimeMs();
         m_RuntimeDiagnostics.gpuUtilization =
             g_Player().Renderer()->GetGPUUtilization();
-        m_RuntimeDiagnostics.serverStatus = g_NetworkManager->Status();
-        m_RuntimeDiagnostics.downloadStatus =
-            g_ContentDownloader().m_gDownloader.GetDownloadStatus();
         m_RuntimeDiagnostics.nextFastUpdateTime = now + 0.5;
     }
 
@@ -1545,24 +1542,15 @@ class CElectricSheep
                 {
                     if (!m_StartupScreen)
                         m_StartupScreen = std::make_shared<Hud::CStartupScreen>(
-                            Base::Math::CRect(0, 0, 1., 1.), "Lato", 24);
-                            
+                            Base::Math::CRect(0, 0, 1., 1.));
+
                     // Start fading out when player has started and we're not already fading
                     if (g_Player().HasStarted() && !m_StartupScreen->IsFadingOut()) {
                         m_StartupScreen->StartFadeOut(m_Timer.Time());
                     }
-                    
+
                     m_StartupScreen->Render(m_Timer.Time(), g_Player().Renderer());
                 }
-                
-                /*if (drawNoSheepIntro)
-                {
-                    if (!m_StartupScreen)
-                        m_StartupScreen = std::make_shared<Hud::CStartupScreen>(
-                            Base::Math::CRect(0, 0, 1., 1.), "Lato", 24);
-                    m_StartupScreen->Render(0., g_Player().Renderer());
-                    
-                }*/
                 
                 Hud::spCStatsConsole spStats =
                     std::dynamic_pointer_cast<Hud::CStatsConsole>(
@@ -1686,6 +1674,10 @@ class CElectricSheep
                 const double now = m_Timer.Time();
                 RefreshFastDiagnostics(now);
                 RefreshSlowDiagnostics(now);
+                // Force live connectivity probes until the first websocket connection
+                // so the cached "not connected" state doesn't flash the Remote indicator at startup.
+                if (!m_RemoteFirstConnected)
+                    RefreshConnectivityState(now, /*force=*/true);
 
                 const bool dreamStatsVisible = IsHudVisible("dreamstats");
                 const bool creditsVisible = IsHudVisible("dreamcredits");
@@ -1763,6 +1755,9 @@ class CElectricSheep
                 double frameGenerationLastMs = g_Player().GetFrameGenerationLastTimeMs();
                 double frameGenerationAvgMs = g_Player().GetFrameGenerationAverageTimeMs();
                 if (spStats && dreamStatsVisible) {
+                    m_RuntimeDiagnostics.serverStatus = g_NetworkManager->Status();
+                    m_RuntimeDiagnostics.downloadStatus =
+                        g_ContentDownloader().m_gDownloader.GetDownloadStatus();
                 updateNextCheckTimeDisplay();
                 if (isStreamingCurrent) {
                     ((Hud::CStringStat*)spStats->Get("decodefps"))
@@ -2276,9 +2271,10 @@ class CElectricSheep
                 // Update GPU usage display (Metal frame time + system GPU %)
                 {
                     float gpuMs = m_RuntimeDiagnostics.gpuFrameTimeMs;
+                    float gpuPct = m_RuntimeDiagnostics.gpuUtilization;
                     std::string sysGpu =
                         (m_RuntimeDiagnostics.gpuUsage >= 0)
-                            ? string_format(", %i%% app", m_RuntimeDiagnostics.gpuUsage)
+                            ? string_format(", %i%%", m_RuntimeDiagnostics.gpuUsage)
                             : "";
                     if (gpuMs >= 0)
                         ((Hud::CStringStat*)spStats->Get("zzagpu2"))
@@ -2311,7 +2307,7 @@ class CElectricSheep
                 {
                     const std::string& serverStatus =
                         m_RuntimeDiagnostics.serverStatus;
-                    pTmp->SetSample(serverStatus.empty() ? "" : serverStatus);
+                    pTmp->SetSample(serverStatus.empty() ? " \n " : serverStatus);
                 }
 
                 pTmp = (Hud::CStringStat*)spStats->Get("loginstatus");

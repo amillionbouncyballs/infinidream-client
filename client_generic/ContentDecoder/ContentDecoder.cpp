@@ -452,28 +452,9 @@ bool CContentDecoder::Open()
     {
         g_Log->Warning("No D3D11 device set on decoder; falling back to software decode");
     }
-#else
-    // macOS: VideoToolbox — frames arrive as CVPixelBufferRef in data[3],
-    // which TextureFlatMetal::GetPixelBuffer() and BindFrame() expect.
-    {
-        AVBufferRef* hw_ctx = nullptr;
-        if (av_hwdevice_ctx_create(&hw_ctx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-                                   nullptr, nullptr, 0) == 0)
-        {
-            ovi->m_pVideoCodecContext->hw_device_ctx = av_buffer_ref(hw_ctx);
-            ovi->m_pVideoCodecContext->get_format     = vt_get_format;
-            av_buffer_unref(&hw_ctx);
-            g_Log->Info("VideoToolbox hardware decoding enabled");
-        }
-        else
-        {
-            g_Log->Error("VideoToolbox unavailable — using software decoding (expect crash)");
-        }
-    }
-#endif
 #elif defined(LINUX_GNU)
-    // Try VAAPI hardware-accelerated decoding. Falls back silently to
-    // software if VAAPI is not available (e.g. no DRI device, VM, etc.).
+    // VAAPI: Falls back silently to software if VAAPI is not available
+    // (e.g. no DRI device, VM, etc.).
     {
         AVBufferRef* hw_ctx = nullptr;
         if (av_hwdevice_ctx_create(&hw_ctx, AV_HWDEVICE_TYPE_VAAPI,
@@ -489,7 +470,29 @@ bool CContentDecoder::Open()
             g_Log->Info("VAAPI unavailable — using software decoding");
         }
     }
-#endif
+#else
+    // macOS: VideoToolbox
+    // Frames arrive as CVPixelBufferRef in data[3], which
+    // TextureFlatMetal::GetPixelBuffer() and BindFrame() expect.
+    // Without this init, the codec outputs software YUV and data[3] is null,
+    // causing a crash inside RendererMetal when it tries to create Metal textures.
+    {
+        AVBufferRef* hw_ctx = nullptr;
+        if (av_hwdevice_ctx_create(&hw_ctx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                   nullptr, nullptr, 0) == 0)
+        {
+            ovi->m_pVideoCodecContext->hw_device_ctx = av_buffer_ref(hw_ctx);
+            ovi->m_pVideoCodecContext->get_format     = vt_get_format;
+            av_buffer_unref(&hw_ctx);
+            g_Log->Info("VideoToolbox hardware decoding enabled");
+        }
+        else
+        {
+            g_Log->Error("VideoToolbox unavailable — using software decoding (expect crash)");
+        }
+    }
+#endif  // WIN32/LINUX_GNU/macOS
+#endif  // USE_HW_ACCELERATION
     // Initialize the codec context
     ovi->m_pFormatContext->flags |= AVFMT_FLAG_IGNIDX;   //	Ignore index.
     ovi->m_pFormatContext->flags |= AVFMT_FLAG_NONBLOCK; //	Do not

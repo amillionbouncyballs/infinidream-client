@@ -27,52 +27,29 @@ class CTextNotification : public Hud::CHudEntry
 {
     DisplayOutput::spCBaseFont m_font;
     DisplayOutput::spCBaseText m_text;
-    std::string m_msg;
 
   public:
     CTextNotification(const std::string& msg)
-        : Hud::CHudEntry(Base::Math::CRect(0, 0, 1, 1)), m_msg(msg)
+        : Hud::CHudEntry(Base::Math::CRect(0, 0, 1, 1))
     {
+        auto r = g_Player().Renderer();
+        if (!r) return;
+        DisplayOutput::CFontDescription d;
+        d.Height(28);
+        d.TypeFace("Lato");
+        d.AntiAliased(true);
+        m_font = r->GetFont(d);
+        m_text = r->NewText(m_font, msg);
     }
 
     bool Render(const double _time, DisplayOutput::spCRenderer _r) override
     {
         if (!Hud::CHudEntry::Render(_time, _r))
             return false;
-        if (!_r) return true;
-
-        // Lazy init — renderer guaranteed to exist by first Render call.
-        if (!m_font)
-        {
-            DisplayOutput::CFontDescription d;
-            d.Height(32);
-            d.TypeFace("Lato");
-            d.AntiAliased(true);
-            m_font = _r->GetFont(d);
-        }
-        if (m_font && !m_text)
-            m_text = _r->NewText(m_font, m_msg);
-        if (!m_text) return true;
-
-        auto spDisplay = _r->Display();
-        if (spDisplay)
-            m_text->SyncLayoutDisplay(spDisplay->Width(), spDisplay->Height());
-
+        if (!m_text || !_r) return true;
         auto ext = m_text->GetExtent();
-        if (ext.m_X < 0.0001f) return true;  // not ready yet
-
-        const float pad = 0.012f;
-        float x0 = 0.5f - ext.m_X * 0.5f - pad;
-        float x1 = 0.5f + ext.m_X * 0.5f + pad;
-        float y0 = 0.03f - pad;
-        float y1 = 0.03f + ext.m_Y + pad;
-
-        _r->Reset(DisplayOutput::eTexture | DisplayOutput::eShader | DisplayOutput::eBlend);
-        _r->SetBlend("alphablend");
-        _r->Apply();
-        _r->DrawQuad(Base::Math::CRect(x0, y0, x1, y1), Base::Math::CVector4(0, 0, 0, 0.7f));
-
-        m_text->SetRect(Base::Math::CRect(x0 + pad, y0 + pad, x1 - pad, y1 - pad));
+        float x = 0.5f - ext.m_X * 0.5f;
+        m_text->SetRect(Base::Math::CRect(x, 0.02f, x + ext.m_X, 0.08f));
         _r->DrawText(m_text, Base::Math::CVector4(1, 1, 1, 1));
         return true;
     }
@@ -212,6 +189,14 @@ class CElectricSheep_Linux : public CElectricSheep
 
         // Playback control
         case DisplayOutput::CKeyEvent::KEY_R:
+            if (spKey->m_bCtrl) {
+#ifdef STAGE
+                PlatformUtils::OpenURLExternally("https://stage.infinidream.ai/rc");
+#else
+                PlatformUtils::OpenURLExternally("https://alpha.infinidream.ai/rc");
+#endif
+                return true;
+            }
             CElectricSheep::HandleOneEvent(spEvent);
             showNotification("Repeat");
             return true;
@@ -224,6 +209,18 @@ class CElectricSheep_Linux : public CElectricSheep
                              std::string(FrameGeneration::ToString(nextMode)));
             return true;
         }
+        case DisplayOutput::CKeyEvent::KEY_B:
+            if (spKey->m_bCtrl) {
+#ifdef STAGE
+                PlatformUtils::OpenURLExternally("https://stage.infinidream.ai/playlists");
+#else
+                PlatformUtils::OpenURLExternally("https://alpha.infinidream.ai/playlists");
+#endif
+                return true;
+            }
+            CElectricSheep::HandleOneEvent(spEvent);
+            showNotification("Report");
+            return true;
         case DisplayOutput::CKeyEvent::KEY_H:
             CElectricSheep::HandleOneEvent(spEvent);
             showNotification("Shuffle");

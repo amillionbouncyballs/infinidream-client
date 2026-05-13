@@ -198,10 +198,10 @@ int CPlayer::AddDisplay([[maybe_unused]] uint32_t screen,
 #ifdef WIN32
     g_Log->Info("Attempting to open %s...", CDisplayDX11::Description());
 
-    spDisplay = std::make_shared<CDisplayDX11>();
+    spDisplay = std::make_shared<DisplayOutput::CDisplayDX11>();
     // spDisplay->SetScreen(screen); 
 
-    if (auto* dx11 = dynamic_cast<CDisplayDX11*>(spDisplay.get()))
+    if (auto* dx11 = dynamic_cast<DisplayOutput::CDisplayDX11*>(spDisplay.get()))
     {
         dx11->SetTargetMonitorIndex(screen);
         dx11->SetDisableExclusiveFullscreen(m_isScreenSaverRun);
@@ -1519,6 +1519,7 @@ void CPlayer::PlayDreamNow(std::string_view _uuid, int64_t frameNumber) {
                     // Set up transition parameters (but don't start yet - wait for clip to buffer)
                     m_transitionDuration = 1.0f;
                     m_pendingSeekCrossfade = true;  // Will start transition when next clip is ready
+
 
                     // Set the start time and store the clip
                     newClip->SetStartTime(m_TimelineTime);

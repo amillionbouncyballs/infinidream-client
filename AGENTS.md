@@ -116,6 +116,7 @@ CClip::Update()                       [render thread]
 Runtime logs are written to one file per day (`YYYY_MM_DD.log`) in:
 - **macOS:** `/Users/Shared/infinidream.ai/Logs/`
 - **Windows:** `C:\ProgramData\Infinidream\Logs\`
+- **Linux:** `/tmp/infinidream-logs/`
 
 ## Deployment
 
