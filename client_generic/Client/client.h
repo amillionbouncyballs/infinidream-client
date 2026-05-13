@@ -848,7 +848,14 @@ class CElectricSheep
         // Ensure storage is read-only when in busy mode (e.g. Mac preview forced after constructor)
         InitStorage(m_MultipleInstancesMode);
 
-        const auto startupFrameGenerationMode = m_FrameGenerationOverrideMode;
+        auto startupFrameGenerationMode = m_FrameGenerationOverrideMode;
+#ifndef INFINIDREAM_ENABLE_RIFE
+        if (startupFrameGenerationMode == FrameGeneration::EFrameGenerationMode::RIFE)
+        {
+            g_Log->Warning("--framegen=rife requested but RIFE not compiled in; using Off");
+            startupFrameGenerationMode = FrameGeneration::EFrameGenerationMode::Off;
+        }
+#endif
         g_Settings()->Set("settings.player.frame_generation.mode",
                           FrameGeneration::ToSetting(startupFrameGenerationMode));
         g_Settings()->Set("settings.player.frame_generation.enabled",

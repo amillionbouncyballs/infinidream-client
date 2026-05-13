@@ -52,7 +52,11 @@ inline EFrameGenerationMode NextMode(EFrameGenerationMode mode)
     case EFrameGenerationMode::Off:
         return EFrameGenerationMode::Blend2X;
     case EFrameGenerationMode::Blend2X:
+#ifdef INFINIDREAM_ENABLE_RIFE
         return EFrameGenerationMode::RIFE;
+#else
+        return EFrameGenerationMode::Off;
+#endif
     case EFrameGenerationMode::RIFE:
         return EFrameGenerationMode::Off;
     }
