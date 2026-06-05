@@ -20,6 +20,42 @@
 #include <string>
 
 /*
+    CTextNotification.
+    Transient centered on-screen notification that auto-removes after a duration.
+*/
+class CTextNotification : public Hud::CHudEntry
+{
+    DisplayOutput::spCBaseFont m_font;
+    DisplayOutput::spCBaseText m_text;
+
+  public:
+    CTextNotification(const std::string& msg)
+        : Hud::CHudEntry(Base::Math::CRect(0, 0, 1, 1))
+    {
+        auto r = g_Player().Renderer();
+        if (!r) return;
+        DisplayOutput::CFontDescription d;
+        d.Height(28);
+        d.TypeFace("Lato");
+        d.AntiAliased(true);
+        m_font = r->GetFont(d);
+        m_text = r->NewText(m_font, msg);
+    }
+
+    bool Render(const double _time, DisplayOutput::spCRenderer _r) override
+    {
+        if (!Hud::CHudEntry::Render(_time, _r))
+            return false;
+        if (!m_text || !_r) return true;
+        auto ext = m_text->GetExtent();
+        float x = 0.5f - ext.m_X * 0.5f;
+        m_text->SetRect(Base::Math::CRect(x, 0.02f, x + ext.m_X, 0.08f));
+        _r->DrawText(m_text, Base::Math::CVector4(1, 1, 1, 1));
+        return true;
+    }
+};
+
+/*
         CElectricSheep_Linux().
         Linux specific client code.
 */
@@ -240,6 +276,13 @@ class CElectricSheep_Linux : public CElectricSheep
             }
             } */
 
+  private:
+    void showNotification(const std::string& msg, float secs = 2.0f)
+    {
+        m_HudManager->Add("notification",
+                          std::make_shared<CTextNotification>(msg),
+                          static_cast<double>(secs));
+    }
 };
 
 #endif // CLIENT_H_INCLUDED
