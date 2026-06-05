@@ -239,6 +239,7 @@ class CPlayer : public Base::CSingleton<CPlayer>
     double GetFrameGenerationLastTimeMs() const;
     double GetFrameGenerationAverageTimeMs() const;
     FrameGeneration::EFrameGenerationMode CycleFrameGenerationMode();
+    inline double GetDisplayFps() const { return m_DisplayFps; }
     inline void Fullscreen(const bool _bState) { m_bFullscreen = _bState; };
     inline bool Stopped() { return !m_bStarted; };
 

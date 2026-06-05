@@ -69,6 +69,12 @@ int32_t main(int argc, char* argv[])
         }
     }
 
+#if !defined(MAC)  // Linux: --fullscreen starts fullscreen; default is windowed.
+    bool startFullscreen = false;
+    for (int i = 1; i < argc; ++i)
+        if (strcmp(argv[i], "--fullscreen") == 0) { startFullscreen = true; break; }
+#endif
+
 #if defined(MAC) || (defined(USE_GLUT) && !defined(WIN32))
     glutInit(&argc, argv);
 #endif
@@ -80,6 +86,9 @@ int32_t main(int argc, char* argv[])
     CElectricSheepClient client;
     client.SetCachedOnlyMode(cachedOnlyMode);
     client.SetFrameGenerationOverrideMode(framegenMode);
+#if !defined(WIN32) && !defined(MAC)
+    client.SetStartFullscreen(startFullscreen);
+#endif
 
     if (client.Startup())
         client.Run();
