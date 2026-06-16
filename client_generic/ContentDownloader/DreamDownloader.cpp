@@ -116,6 +116,16 @@ void DreamDownloader::FindDreamsThread() {
             bool hasEnoughQuota = cm.getRemainingQuota() >= (long long)minSpaceForDream;
 
             if (!hasEnoughQuota) {
+                if (!cm.isQuotaKnown()) {
+                    if (!quotaWarningLogged) {
+                        g_Log->Info("Quota not yet fetched, waiting...");
+                        quotaWarningLogged = true;
+                    }
+                    SetDownloadStatus("Waiting for quota...");
+                    boost::this_thread::sleep(boost::get_system_time() +
+                                         boost::posix_time::seconds(5));
+                    continue;
+                }
                 if (!quotaWarningLogged) {
                     g_Log->Info("Quota too low to grab new videos");
                     quotaWarningLogged = true;

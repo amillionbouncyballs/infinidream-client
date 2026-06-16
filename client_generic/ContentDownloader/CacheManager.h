@@ -85,6 +85,11 @@ public:
     
     void setRemainingQuota(long long newQuota) {
        remainingQuota = newQuota;
+       quotaKnown = true;
+    }
+
+    bool isQuotaKnown() const {
+       return quotaKnown;
     }
     void decreaseRemainingQuota(long long amount);
     
@@ -159,6 +164,7 @@ private:
     static std::unique_ptr<CacheManager> instance;
     std::unordered_map<std::string, Dream> dreams;
     static long long remainingQuota;
+    static bool quotaKnown;
     std::chrono::system_clock::time_point quotaExpiresAt;
     
     // diskCachedItem/historyItem

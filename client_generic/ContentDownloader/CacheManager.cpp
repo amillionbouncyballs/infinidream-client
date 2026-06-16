@@ -26,6 +26,7 @@ namespace fs = std::filesystem;
 
 std::unique_ptr<CacheManager> CacheManager::instance;
 long long CacheManager::remainingQuota = 0;
+bool CacheManager::quotaKnown = false;
 
 CacheManager& CacheManager::getInstance() {
     static std::once_flag flag;
