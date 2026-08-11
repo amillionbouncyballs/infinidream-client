@@ -8,7 +8,9 @@ Usage:
     cd client/client_generic/LinuxBuild
     ./build.py
 
-Output: infinidream-<arch>.AppImage in this directory.
+Output: infinidream-<arch>.AppImage in this directory, or
+        infinidream-rife-<arch>.AppImage when INFINIDREAM_ENABLE_RIFE is set in
+        the environment (see build_appimage_with_rife.sh).
 
 Requirements:
   - Build tools: cmake, gcc, g++, make, perl
@@ -132,6 +134,12 @@ TOOLS_DIR    = SCRIPT_DIR / "appimage-tools"
 DEPS_SRC     = SCRIPT_DIR / "deps-src"
 RUNTIME_DIR  = SCRIPT_DIR.parent / "Runtime"
 
+# build_appimage_with_rife.sh sets this in the environment. CMake's option() does
+# not read the environment, so translate it into a -D flag below -- without this
+# the "with_rife" wrapper silently produced a plain non-RIFE AppImage.
+ENABLE_RIFE  = os.environ.get("INFINIDREAM_ENABLE_RIFE", "OFF").upper() in (
+    "ON", "1", "TRUE", "YES")
+
 # Dependency versions (pinned for reproducibility)
 OPENSSL_VERSION  = "3.5.0"
 OPENSSL_TARBALL  = f"openssl-{OPENSSL_VERSION}.tar.gz"
@@ -157,7 +165,11 @@ LINUXDEPLOY_URL  = (f"https://github.com/linuxdeploy/linuxdeploy/releases/"
 APPIMAGETOOL_URL = (f"https://github.com/AppImage/appimagetool/releases/"
                     f"download/continuous/{APPIMAGETOOL_BIN}")
 
-OUTPUT_APPIMAGE  = SCRIPT_DIR / f"infinidream-{ARCH}.AppImage"
+# Name the artifact after what is in it. A RIFE build and a plain build differ in
+# behaviour but not in filename otherwise, and the two are easy to confuse once
+# they are sitting side by side in this directory.
+OUTPUT_APPIMAGE  = SCRIPT_DIR / (f"infinidream-rife-{ARCH}.AppImage" if ENABLE_RIFE
+                                 else f"infinidream-{ARCH}.AppImage")
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +457,7 @@ def build_infinidream(shim_obj: Path) -> None:
         "-DCMAKE_CXX_COMPILER=g++",
         f"-DOPENSSL_ROOT_DIR={OPENSSL_INSTALL}",
         "-DBoost_USE_STATIC_LIBS=ON",
+        f"-DINFINIDREAM_ENABLE_RIFE={'ON' if ENABLE_RIFE else 'OFF'}",
         f"-DCMAKE_EXE_LINKER_FLAGS={linker_flags}",
     ], env={"PKG_CONFIG_PATH": pkg_config_path, **os.environ})
 
@@ -508,6 +521,21 @@ def assemble_appdir() -> None:
     if shaders_dst.exists():
         shutil.rmtree(shaders_dst)
     shutil.copytree(shaders_src, shaders_dst)
+
+    # RIFE loads its weights from <binary_dir>/models/rife-v4.6/ at runtime, so
+    # the model tree CMake staged next to the binary has to travel into the
+    # AppImage too -- otherwise a RIFE-enabled build packages with no weights and
+    # falls back to blend interpolation on the user's machine.
+    if ENABLE_RIFE:
+        models_src = BUILD_DIR / "models"
+        if not models_src.is_dir():
+            sys.exit(f"RIFE build produced no model directory: {models_src}")
+
+        models_dst = APPDIR / "usr" / "bin" / "models"
+        if models_dst.exists():
+            shutil.rmtree(models_dst)
+        shutil.copytree(models_src, models_dst)
+        log(f"Bundled RIFE models from {models_src}")
 
     # Runtime assets (logo, font, OSD PNGs) sit next to the binary so
     # SHAREDIR="./" resolves correctly when AppRun cd's into usr/bin/
