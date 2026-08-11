@@ -75,6 +75,11 @@ void ESShowFirstTimeSetup()
     }
 }
 
+bool ESHasFirstTimeSetupCallback()
+{
+    return gShowFirstTimeSetupCallback != nullptr;
+}
+
 long long EDreamClient::remainingQuota = 0;
 std::chrono::system_clock::time_point EDreamClient::quotaExpiresAt = std::chrono::system_clock::now();
 
@@ -297,6 +302,12 @@ void EDreamClient::UpdateQuota()
             }
         }
     }
+
+    // FIX (issue #656): the backend silently rotates the session and returns the new
+    // sealed session only as a Set-Cookie header on an otherwise-200 response. This
+    // endpoint previously never called ParseAndSaveCookies, so that rotation was dropped
+    // and the stored session went stale, causing a delayed sign-out. Persist it here.
+    ParseAndSaveCookies(spDownload);
 
     // Parse the quota response
     try
@@ -675,9 +686,17 @@ bool EDreamClient::Authenticate()
         g_Log->Warning("No sealed session found");
 
         // Try magic link login via email in settings (settings.generator.nickname).
+        // On Linux, skip the console path if a GUI wizard is registered — the wizard
+        // will handle authentication and the auth loop will retry automatically.
+        // On Mac/Windows the GUI wizard is always registered but those platforms use
+        // their own GUI auth flow; magic link is still attempted as a fallback.
         // ValidateCodeDetailed() calls RefreshSealedSession() internally — no
         // second refresh needed if this returns true.
+#ifdef LINUX_GNU
+        if (!ESHasFirstTimeSetupCallback() && LoginWithMagicLinkCode())
+#else
         if (LoginWithMagicLinkCode())
+#endif
         {
             fIsLoggedIn.exchange(true);
             fInitialAuthComplete.store(true);
@@ -726,10 +745,7 @@ bool EDreamClient::Authenticate()
         fAuthCV.notify_one();
         if (!shownSettingsOnce) {
             shownSettingsOnce = true;
-            bool firstTimeSetupCompleted = g_Settings()->Get("settings.app.firsttimesetup", false);
-            if (!firstTimeSetupCompleted) {
-                ESShowFirstTimeSetup();
-            }
+            ESShowFirstTimeSetup();
         }
         return false;
     }
@@ -772,6 +788,8 @@ bool EDreamClient::Authenticate()
                 ServerConfig::ServerConfigManager::getInstance().getEndpoint(
                     ServerConfig::Endpoint::QUOTA));
             const long httpCode = static_cast<long>(spValidate->ResponseCode());
+            // FIX (issue #656): persist any session rotation returned on this validation call.
+            ParseAndSaveCookies(spValidate);
 
             if (reachable && httpCode == 200)
             {
@@ -850,6 +868,8 @@ bool EDreamClient::Authenticate()
                 ServerConfig::ServerConfigManager::getInstance().getEndpoint(
                     ServerConfig::Endpoint::QUOTA));
             const long httpCode = static_cast<long>(spValidate->ResponseCode());
+            // FIX (issue #656): persist any session rotation returned on this validation call.
+            ParseAndSaveCookies(spValidate);
 
             if (reachable && httpCode == 200)
             {
@@ -1141,24 +1161,34 @@ EDreamClient::SendCodeResult EDreamClient::SendCode() {
         std::string jsonBody = boost::json::serialize(payload);
         
         MagicLinkHeaderCtx hdrCtx;
+        char errorBuffer[CURL_ERROR_SIZE] = {0};
         curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, jsonBody.c_str());
         curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, MagicLinkHeaderCallback);
         curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, &hdrCtx);
-        
+        curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, errorBuffer);
+#ifdef _WIN32
+        // Schannel hard-fails the TLS handshake when certificate revocation
+        // servers are unreachable (common behind AV TLS interception or
+        // filtered networks). Soft-fail like browsers do; genuinely revoked
+        // certs are still rejected. No-op on non-Schannel curl backends.
+        curl_easy_setopt(curl.get(), CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT);
+#endif
+
         // Set headers
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers);
-        
+
         res = curl_easy_perform(curl.get());
         curl_slist_free_all(headers);
-        
+
         if(res != CURLE_OK) {
-            g_Log->Error("Failed to send verification code. Curl error: %s", curl_easy_strerror(res));
-            return SendCodeResult{false, 0, std::string("Error: ") + curl_easy_strerror(res)};
+            const char* detail = errorBuffer[0] ? errorBuffer : curl_easy_strerror(res);
+            g_Log->Error("Failed to send verification code. Curl error: %s", detail);
+            return SendCodeResult{false, 0, std::string("Error: ") + detail};
         }
         
         long http_code = 0;
@@ -1224,12 +1254,21 @@ EDreamClient::ValidateCodeResult EDreamClient::ValidateCodeDetailed(const std::s
         std::string jsonBody = boost::json::serialize(payload);
 
         MagicLinkHeaderCtx hdrCtx;
+        char errorBuffer[CURL_ERROR_SIZE] = {0};
         curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, jsonBody.c_str());
         curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, MagicLinkHeaderCallback);
         curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, &hdrCtx);
+        curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, errorBuffer);
+#ifdef _WIN32
+        // Schannel hard-fails the TLS handshake when certificate revocation
+        // servers are unreachable (common behind AV TLS interception or
+        // filtered networks). Soft-fail like browsers do; genuinely revoked
+        // certs are still rejected. No-op on non-Schannel curl backends.
+        curl_easy_setopt(curl.get(), CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT);
+#endif
 
         // Set headers
         struct curl_slist *headers = NULL;
@@ -1240,9 +1279,10 @@ EDreamClient::ValidateCodeResult EDreamClient::ValidateCodeDetailed(const std::s
         curl_slist_free_all(headers);
 
         if(res != CURLE_OK) {
-            g_Log->Error("Failed to validate code. Curl error: %s", curl_easy_strerror(res));
+            const char* detail = errorBuffer[0] ? errorBuffer : curl_easy_strerror(res);
+            g_Log->Error("Failed to validate code. Curl error: %s", detail);
             result.reason = ValidationFailureReason::TransientFailure;
-            result.message = std::string("Network error: ") + curl_easy_strerror(res);
+            result.message = std::string("Network error: ") + detail;
             return result;
         }
 
@@ -1781,6 +1821,9 @@ void EDreamClient::SendTelemetry(const std::string& eventType, const boost::json
     if (!spDownload->Perform(url)) {
         g_Log->Error("Failed to send telemetry. Server returned %i", spDownload->ResponseCode());
     }
+    // FIX (issue #656): persist any rotated session the backend returned via Set-Cookie,
+    // otherwise telemetry (like UpdateQuota) silently drops the rotation.
+    ParseAndSaveCookies(spDownload);
 }
 
 void EDreamClient::ReportMD5Failure(const std::string& uuid, const std::string& foundMd5, bool isStreaming) {
@@ -1854,18 +1897,21 @@ std::future<bool> EDreamClient::EnqueuePlaylistAsync(const std::string& uuid) {
             return false;
         }
 
+        // Parse on this network worker before handing the playlist to the
+        // player thread. ParsePlaylist fills any missing dream metadata and
+        // prefetches the first streaming URL; both operations may block on the
+        // server and must not pause rendering during a playlist switch.
+        auto entries = ParsePlaylist(uuid);
+        if (entries.empty()) {
+            g_Log->Error("Failed to prepare playlist. UUID: %s", uuid.c_str());
+            return false;
+        }
+
         // save the current playlist id, this will get reused at next startup
         g_Settings()->Set("settings.content.current_playlist_uuid", uuid);
         
-        std::thread([uuid]() {
-            if (!g_Player().SingletonActive() || g_Player().IsShuttingDown()) return;
-            g_Log->Info("Will call set playlist");
-            g_Player().SetPlaylist(std::string(uuid), false);
-            if (!g_Player().SingletonActive() || g_Player().IsShuttingDown()) return;
-            g_Player().SetTransitionDuration(1.0f);
-            g_Log->Info("Will call start transition");
-            g_Player().StartTransition();
-        }).detach();
+        // Player and renderer state is owned by the frame-update thread.
+        g_Player().EnqueuePlaylistChange(uuid);
         
         return true;
     });
@@ -2120,7 +2166,44 @@ bool EDreamClient::FetchDreamsMetadata(const std::vector<std::string>& uuids) {
     if (uuids.empty()) {
         return false;
     }
-    
+
+    // The server caps a single metadata request (it rejects oversized bodies
+    // with HTTP 413, see client issue #522). Page large requests into batches
+    // so big playlists (e.g. a playlist-of-playlists) load their metadata
+    // instead of failing wholesale. Must stay <= the backend's
+    // CLIENT_DREAMS_MAX_UUIDS.
+    constexpr size_t kMetadataBatchSize = 1000;
+
+    if (uuids.size() <= kMetadataBatchSize) {
+        return FetchDreamsMetadataBatch(uuids);
+    }
+
+    bool allSucceeded = true;
+    for (size_t offset = 0; offset < uuids.size(); offset += kMetadataBatchSize) {
+        // Check for abort between batches to allow fast shutdown.
+        if (g_NetworkManager->IsAborted()) {
+            g_Log->Info("FetchDreamsMetadata() aborted due to shutdown");
+            return false;
+        }
+
+        const size_t end = std::min(offset + kMetadataBatchSize, uuids.size());
+        const std::vector<std::string> batch(uuids.begin() + offset,
+                                             uuids.begin() + end);
+        if (!FetchDreamsMetadataBatch(batch)) {
+            g_Log->Error("Failed to fetch metadata batch [%zu, %zu) of %zu dreams",
+                         offset, end, uuids.size());
+            // Keep going so we cache as much metadata as possible.
+            allSucceeded = false;
+        }
+    }
+    return allSucceeded;
+}
+
+bool EDreamClient::FetchDreamsMetadataBatch(const std::vector<std::string>& uuids) {
+    if (uuids.empty()) {
+        return false;
+    }
+
     auto jsonPath = Cache::PathManager::getInstance().jsonDreamPath();
     Network::spCFileDownloader spDownload;
     int maxAttempts = 3;
@@ -2378,10 +2461,14 @@ std::vector<PlaylistEntry> EDreamClient::ParsePlaylist(std::string_view uuid) {
         auto dream = cm.getDream(needsStreamingUuid);
 
         if (dream) {
-            // Grab streaming URL and save it for later use
-            g_Log->Info("Parse playlist blocking call for download link");
-            auto path = EDreamClient::GetDreamDownloadLink(dream->uuid);
-            dream->setStreamingUrl(path);
+            // EnqueuePlaylistAsync prepares this on its network worker before
+            // the player parses the playlist. Do not perform the request again
+            // when the player-thread parse sees the already prepared dream.
+            if (dream->getStreamingUrl().empty()) {
+                g_Log->Info("Parse playlist blocking call for download link");
+                auto path = EDreamClient::GetDreamDownloadLink(dream->uuid);
+                dream->setStreamingUrl(path);
+            }
         } else {
             // Metadata fetch failed or didn't include this dream; skip the
             // prefetch. The entry gets filtered out of the playlist anyway
@@ -2470,10 +2557,7 @@ bool EDreamClient::EnqueuePlaylist(std::string_view uuid) {
 
     // save the current playlist id, this will get reused at next startup
     g_Settings()->Set("settings.content.current_playlist_uuid", uuid);
-    g_Player().SetPlaylist(std::string(uuid), false);
-    
-    g_Player().SetTransitionDuration(1.0f);
-    g_Player().StartTransition();
+    g_Player().EnqueuePlaylistChange(std::string(uuid));
     
     return true;
 }
@@ -2544,7 +2628,7 @@ static void OnWebSocketMessage(sio::event& _wsEvent)
         }
 
         g_Log->Info("should play : %s", uuid.data());
-        g_Player().PlayDreamNow(uuid.data(), frameNumber);
+        g_Player().EnqueuePlayDream(std::string(uuid), frameNumber);
     }
     else if (event == WsEvent::kPlayPlaylist)
     {
@@ -2896,4 +2980,3 @@ void EDreamClient::Report(std::string uuid) {
 
 
 void EDreamClient::SetCPUUsage(int _cpuUsage) { fCpuUsage.exchange(_cpuUsage); }
-

@@ -83,6 +83,7 @@ extern void ESShowPreferences();
 typedef void (*ShowFirstTimeSetupCallback_t)();
 extern void ESSetShowFirstTimeSetupCallback(ShowFirstTimeSetupCallback_t);
 extern void ESShowFirstTimeSetup();
+extern bool ESHasFirstTimeSetupCallback();
 
 #if defined(WIN32)
 /// True while the first-run ImGui wizard is active (used to skip game HUD compositing).
@@ -401,7 +402,7 @@ class CElectricSheep
 
             BK(FULLSCREEN_MODIFIER_KEY "-R") ": Open remote control\n"
             BK(FULLSCREEN_MODIFIER_KEY "-B") ": Browse playlists\n"
-            BK(FULLSCREEN_MODIFIER_KEY "-,") ": Open settings"
+            BK(FULLSCREEN_MODIFIER_KEY "-Comma") ": Open settings"
 #ifdef LINUX_GNU
             "\n" BK(FULLSCREEN_MODIFIER_KEY "-Q") ": Quit"
 #endif
@@ -915,25 +916,30 @@ class CElectricSheep
             if (sealedSession.empty())
             {
                 // Try to get a sealed session interactively before the window opens.
-                if (!EDreamClient::LoginWithMagicLinkCode())
+                // Skip the console path entirely if a GUI wizard is registered — it will
+                // handle auth after the window opens.
+                if (!ESHasFirstTimeSetupCallback())
                 {
-                    // Magic link not available (no credentials file, no tty, or user declined).
-                    // Fall back to API key if one is configured.
-                    const char* envKey = getenv("INFINIDREAM_API_KEY");
-                    std::string storedKey = g_Settings()->Get("settings.content.api_key", std::string(""));
-                    if (!((envKey && *envKey) || !storedKey.empty()))
+                    if (!EDreamClient::LoginWithMagicLinkCode())
                     {
-                        fprintf(stderr,
-                            "\nNo sealed session or API key found.\n"
-                            "Options:\n"
-                            "  1. Run interactively to be prompted for your email and log in\n"
-                            "  2. Set INFINIDREAM_API_KEY environment variable\n"
-                            "  3. Run with --cached to play locally cached videos\n");
-                        return false;
+                        // Magic link not available (no credentials, no tty, or user declined).
+                        // Fall back to API key if one is configured.
+                        const char* envKey = getenv("INFINIDREAM_API_KEY");
+                        std::string storedKey = g_Settings()->Get("settings.content.api_key", std::string(""));
+                        if (!((envKey && *envKey) || !storedKey.empty()))
+                        {
+                            fprintf(stderr,
+                                "\nNo sealed session or API key found.\n"
+                                "Options:\n"
+                                "  1. Run interactively to be prompted for your email and log in\n"
+                                "  2. Set INFINIDREAM_API_KEY environment variable\n"
+                                "  3. Run with --cached to play locally cached videos\n");
+                            return false;
+                        }
+                        fprintf(stderr, "Warning: no sealed session token — video downloads may not work with API key only.\n");
                     }
-                    fprintf(stderr, "Warning: no sealed session token — video downloads may not work with API key only.\n");
+                    // else: LoginWithMagicLinkCode() succeeded — sealed session now in settings
                 }
-                // else: LoginWithMagicLinkCode() succeeded — sealed session now in settings
             }
         }
 #endif  // LINUX_GNU
@@ -1122,6 +1128,7 @@ class CElectricSheep
         m_SplashFilename = std::string();
         m_spCrossFade = nullptr;
         m_StartupScreen = nullptr;
+        m_spOSD = nullptr;
         m_HudManager = nullptr;
         m_bPaused = false;
 
