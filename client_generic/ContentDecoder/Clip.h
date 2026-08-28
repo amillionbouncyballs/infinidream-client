@@ -115,9 +115,16 @@ private:
     double m_PresentationFps = 0.0;
 
 public:
+    //	_prebuiltInterpolator: an already-initialized shared interpolator (the
+    //	player's RIFE instance). Pass it whenever one exists. Without it this clip
+    //	constructs its own CRifeInterpolatorNcnn, and the IsAvailable() call below
+    //	then loads the model and builds every ncnn Vulkan pipeline — hundreds of
+    //	shader compilations — on the thread constructing the clip, which is the
+    //	player thread, mid-playback, once per dream.
     CClip(const sClipMetadata& _metadata, spCRenderer _spRenderer,
           int32_t _displayMode, uint32_t _displayWidth,
-          uint32_t _displayHeight);
+          uint32_t _displayHeight,
+          FrameGeneration::spIFrameInterpolator _prebuiltInterpolator = nullptr);
     bool Start(int64_t _seekFrame = -1);
     void Stop();
     // Must be called by the render/update thread before asynchronous teardown.
@@ -195,6 +202,11 @@ public:
     void ReconfigureFrameGeneration(FrameGeneration::EFrameGenerationMode newMode,
                                     FrameGeneration::spIFrameInterpolator prebuiltInterpolator = nullptr,
                                     double displayFps = 0.0);
+    //	Pause/resume interpolation for this clip, leaving its configuration,
+    //	buffered frames, decoder clock and presentation fps untouched. Cheap and
+    //	idempotent — safe to call every frame. Use this, not
+    //	ReconfigureFrameGeneration(Off), for anything temporary.
+    void SuspendFrameGeneration(bool _suspended);
     std::shared_ptr<FrameGeneration::CRifeInterpolatorNcnn> GetRifeInterpolator() const;
     double GetPresentationFps() const { return m_PresentationFps > 0.0 ? m_PresentationFps : m_ClipMetadata.decodeFps; }
     std::string GetFrameGenerationMode() const;

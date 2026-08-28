@@ -48,7 +48,8 @@ static double SelectFrameGenerationTargetFps(double sourceFps,
 
 CClip::CClip(const sClipMetadata& _metadata, spCRenderer _spRenderer,
              int32_t _displayMode, uint32_t _displayWidth,
-             uint32_t _displayHeight)
+             uint32_t _displayHeight,
+             FrameGeneration::spIFrameInterpolator _prebuiltInterpolator)
     : m_ClipMetadata(_metadata), m_spRenderer(_spRenderer),
 m_CurrentFrameMetadata{}, m_HasFinished(false), m_IsFadingOut(false)
 {
@@ -158,7 +159,15 @@ m_CurrentFrameMetadata{}, m_HasFinished(false), m_IsFadingOut(false)
             interpolator = std::make_shared<FrameGeneration::CBlendFrameInterpolator>();
             break;
         case FrameGeneration::EFrameGenerationMode::RIFE:
-            interpolator = std::make_shared<FrameGeneration::CRifeInterpolatorNcnn>();
+            // Reuse the player's initialized instance when there is one. Building a
+            // fresh CRifeInterpolatorNcnn here means the IsAvailable() call below
+            // loads the model and creates every ncnn Vulkan pipeline on this
+            // thread — measured as create_pipeline/glslang/yyparse burning the
+            // player thread once per dream, which is what made transitions choke.
+            if (_prebuiltInterpolator && _prebuiltInterpolator->IsAvailable())
+                interpolator = _prebuiltInterpolator;
+            else
+                interpolator = std::make_shared<FrameGeneration::CRifeInterpolatorNcnn>();
             break;
         case FrameGeneration::EFrameGenerationMode::Off:
             break;
@@ -866,6 +875,12 @@ void CClip::ResetFrameGeneration()
 bool CClip::IsFrameGenerationEnabled() const
 {
     return m_spFrameGeneration && m_spFrameGeneration->Enabled();
+}
+
+void CClip::SuspendFrameGeneration(bool _suspended)
+{
+    if (m_spFrameGeneration)
+        m_spFrameGeneration->SetGenerationSuspended(_suspended);
 }
 
 void CClip::ReconfigureFrameGeneration(FrameGeneration::EFrameGenerationMode newMode,

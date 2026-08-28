@@ -280,6 +280,10 @@ class CPlayer : public Base::CSingleton<CPlayer>
     bool IsFrameGenerationEnabled() const;
     std::string GetFrameGenerationMode() const;
     uint64_t GetGeneratedFrameCount() const;
+    //	The clip the on-screen stats should describe — the incoming clip once a
+    //	crossfade is past halfway, otherwise the current one. Caller must hold
+    //	m_UpdateMutex.
+    ContentDecoder::spCClip StatsClipLocked() const;
     uint64_t GetPresentedRealFrameCount() const;
     double GetFrameGenerationLastTimeMs() const;
     double GetFrameGenerationAverageTimeMs() const;

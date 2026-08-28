@@ -1,6 +1,8 @@
 #include "FrameGenerationScheduler.h"
 
+#include "Log.h"
 #include "RifeInterpolatorNcnn.h"
+#include <chrono>
 
 namespace FrameGeneration
 {
@@ -50,6 +52,7 @@ void CFrameGenerationScheduler::Reset()
     }
 
     m_prefetchedNextRealFrame.reset();
+    m_prefetchedAfterNextRealFrame.reset();
     m_currentRealFrame.reset();
     m_nextRealFrame.reset();
     m_generatedFrame.reset();
@@ -58,6 +61,7 @@ void CFrameGenerationScheduler::Reset()
     m_displayPhase = 0.0;
     m_pendingSyntheticFrames = 0.0;
     m_generatedFrameCount = 0;
+    m_missedSyntheticSlots = 0;
     m_realFrameCount = 0;
 }
 
@@ -139,18 +143,10 @@ ContentDecoder::spCVideoFrame CFrameGenerationScheduler::takeAsyncResult(
 {
     std::unique_lock<std::mutex> lock(m_asyncMutex);
 
-    if (!m_resultReady)
-    {
-        if (m_jobPending)
-        {
-            // Worker hasn't even started yet — not worth waiting; caller falls back to sync.
-            return nullptr;
-        }
-        // Worker is running — it should finish within a frame budget; wait briefly.
-        m_asyncResultCv.wait_for(lock, std::chrono::milliseconds(50),
-            [this] { return m_resultReady || m_asyncStop; });
-    }
-
+    // Never wait. This used to block on m_asyncResultCv for up to 50ms when the
+    // worker was mid-inference, which is 7 frames at 144Hz and was the single
+    // largest source of visible hitching. If the result is not ready this instant,
+    // the caller repeats a real frame for this slot and we try again next time.
     if (!m_resultReady || !m_asyncResult)
         return nullptr;
 
@@ -166,36 +162,43 @@ ContentDecoder::spCVideoFrame CFrameGenerationScheduler::takeAsyncResult(
     return std::move(m_asyncResult);
 }
 
-void CFrameGenerationScheduler::maybePreFetchAndSubmit(
-    const FrameProvider& frameProvider,
-    double synthsPerGap,
-    const ContentDecoder::spCVideoFrame& prevFrame)
+void CFrameGenerationScheduler::topUpPrefetchAndSubmit(const FrameProvider& frameProvider)
 {
-    if (!m_asyncThread.joinable() || !m_interpolator || !prevFrame)
+    if (!frameProvider)
         return;
 
-    // Only pre-fetch if the next gap is actually going to need a synthetic frame.
-    if (m_pendingSyntheticFrames + synthsPerGap < 1.0)
+    // Refill the two-frame lookahead. frameProvider() returns null when the
+    // decoder has nothing queued; that is normal and simply means we try again on
+    // the next tick, so never treat it as an error.
+    if (!m_prefetchedNextRealFrame)
+        m_prefetchedNextRealFrame = frameProvider();
+    if (m_prefetchedNextRealFrame && !m_prefetchedAfterNextRealFrame)
+        m_prefetchedAfterNextRealFrame = frameProvider();
+
+    if (!m_asyncThread.joinable() || !m_interpolator)
         return;
 
-    // Don't clobber a job or result already in the pipeline for this same pair.
+    // Prefetch still happens while suspended (the decoder pipeline should not
+    // stall), but submit no work: a job started here would run an inference on the
+    // shared RIFE mutex, which is exactly what suspending exists to avoid.
+    if (m_generationSuspended)
+        return;
+
+    if (!m_prefetchedNextRealFrame || !m_prefetchedAfterNextRealFrame)
+        return;
+
+    if (!canGenerateBetween(m_prefetchedNextRealFrame, m_prefetchedAfterNextRealFrame))
+        return;
+
+    // Don't clobber a job in flight or a result not yet consumed.
     {
         std::lock_guard<std::mutex> lock(m_asyncMutex);
         if (m_jobPending || m_jobRunning || m_resultReady)
             return;
     }
 
-    // Pull the next real frame from the decoder now so the worker can start immediately.
-    auto nextFrame = frameProvider();
-    if (!nextFrame)
-        return;
-
-    m_prefetchedNextRealFrame = nextFrame;
-
-    if (!canGenerateBetween(prevFrame, m_prefetchedNextRealFrame))
-        return;
-
-    submitAsyncJob(prevFrame, m_prefetchedNextRealFrame, m_interpolator);
+    submitAsyncJob(m_prefetchedNextRealFrame, m_prefetchedAfterNextRealFrame,
+                   m_interpolator);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +318,7 @@ bool CFrameGenerationScheduler::Advance(const FrameProvider& frameProvider, std:
         ++m_realFrameCount;
 
         // Pre-fetch the frame after this one so the worker can start early.
-        maybePreFetchAndSubmit(frameProvider, synthsPerGap, m_currentRealFrame);
+        topUpPrefetchAndSubmit(frameProvider);
         return true;
     }
 
@@ -328,6 +331,10 @@ bool CFrameGenerationScheduler::Advance(const FrameProvider& frameProvider, std:
         if (m_prefetchedNextRealFrame)
         {
             m_nextRealFrame = std::move(m_prefetchedNextRealFrame);
+            // Shift the lookahead down so prefetchedNext is always the frame
+            // after m_nextRealFrame; topUpPrefetchAndSubmit() refills the tail.
+            m_prefetchedNextRealFrame = std::move(m_prefetchedAfterNextRealFrame);
+            m_prefetchedAfterNextRealFrame.reset();
         }
         else if (!prepareNextRealFrame(frameProvider, reason))
         {
@@ -337,15 +344,41 @@ bool CFrameGenerationScheduler::Advance(const FrameProvider& frameProvider, std:
         m_pendingSyntheticFrames += synthsPerGap;
         const bool shouldGenerateThisGap = m_pendingSyntheticFrames >= 1.0;
 
+        // True when the slot below is filled with a repeated real frame rather than
+        // an interpolated one, so the stats can tell the two apart.
+        bool slotIsRepeat = false;
+
         if (shouldGenerateThisGap && canGenerateBetween(m_currentRealFrame, m_nextRealFrame))
         {
-            // Try the async pre-computed result first.
-            if (m_asyncThread.joinable())
+            if (m_generationSuspended)
+            {
+                slotIsRepeat = true;
+                // Fill the synthetic slot by repeating the current real frame.
+                // Keeping the slot filled is the point: dropping it instead would
+                // advance real frames at the presentation rate and play the clip
+                // targetFps/sourceFps too fast.
+                m_generatedFrame = m_currentRealFrame;
+            }
+            else if (m_asyncThread.joinable())
+            {
+                // GPU-backed: take the pre-computed result if the worker has one
+                // ready. If not, repeat the current real frame rather than running
+                // the inference inline — a synchronous Interpolate() here costs
+                // 15-30ms on the render thread, which is the hitch we are avoiding.
                 m_generatedFrame = takeAsyncResult(m_currentRealFrame, m_nextRealFrame);
-
-            // Fall back to synchronous if the async result isn't ready.
-            if (!m_generatedFrame)
+                if (!m_generatedFrame)
+                {
+                    m_generatedFrame = m_currentRealFrame;
+                    slotIsRepeat = true;
+                    ++m_missedSyntheticSlots;
+                }
+            }
+            else
+            {
+                // CPU interpolators (blend) have no worker and are sub-millisecond,
+                // so running them inline costs nothing worth pipelining.
                 m_generatedFrame = m_interpolator->Interpolate(m_currentRealFrame, m_nextRealFrame, 0.5f);
+            }
         }
         else
         {
@@ -358,11 +391,15 @@ bool CFrameGenerationScheduler::Advance(const FrameProvider& frameProvider, std:
             m_displayFrame = m_generatedFrame;
             m_displayPhase = 0.5;
             m_displayGeneratedNext = true;
-            ++m_generatedFrameCount;
+            // A repeated frame — suspended during a crossfade, or the worker not
+            // being ready in time — is not an interpolated one. Counting it would
+            // overstate what RIFE actually produced.
+            if (!slotIsRepeat)
+                ++m_generatedFrameCount;
 
             // While we display this generated frame, pre-fetch the frame after
             // m_nextRealFrame and start the next RIFE job in the background.
-            maybePreFetchAndSubmit(frameProvider, synthsPerGap, m_nextRealFrame);
+            topUpPrefetchAndSubmit(frameProvider);
             return true;
         }
 
@@ -374,7 +411,7 @@ bool CFrameGenerationScheduler::Advance(const FrameProvider& frameProvider, std:
         m_displayGeneratedNext = false;
         ++m_realFrameCount;
 
-        maybePreFetchAndSubmit(frameProvider, synthsPerGap, m_currentRealFrame);
+        topUpPrefetchAndSubmit(frameProvider);
         return true;
     }
 
@@ -397,7 +434,7 @@ bool CFrameGenerationScheduler::Advance(const FrameProvider& frameProvider, std:
     ++m_realFrameCount;
 
     // Pre-fetch and submit the next job while the render thread displays this real frame.
-    maybePreFetchAndSubmit(frameProvider, synthsPerGap, m_currentRealFrame);
+    topUpPrefetchAndSubmit(frameProvider);
     return true;
 }
 

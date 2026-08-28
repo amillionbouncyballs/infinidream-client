@@ -927,6 +927,14 @@ bool CPlayer::BeginFrameUpdate()
     if (m_bPaused || IsFirstRunWizardPlaybackHold())
         return true;
 
+    // Lift the crossfade suspension (see StartTransition) as soon as no crossfade
+    // is running. Done here rather than paired with each StartTransition because
+    // m_isTransitioning is cleared in eight places, including cancellation paths;
+    // a missed resume would leave the visible clip repeating frames forever.
+    // SuspendFrameGeneration is an idempotent atomic store, so per-frame is free.
+    if (!m_isTransitioning && m_currentClip)
+        m_currentClip->SuspendFrameGeneration(false);
+
     double newTime = m_Timer.Time();
     if (m_LastFrameRealTime == 0.0)
         m_LastFrameRealTime = newTime;
@@ -1349,7 +1357,7 @@ bool CPlayer::PlayClip(const std::shared_ptr<const Cache::Dream>& dream, double 
     auto newClip = std::make_shared<ContentDecoder::CClip>(
         ContentDecoder::sClipMetadata{path, m_PerceptualFPS / dream->activityLevel, *dream},
         du->spRenderer, displayMode, du->spDisplay->Width(),
-        du->spDisplay->Height());
+        du->spDisplay->Height(), m_rifeInterpolator);
     
     // Update internal decoder fps counter
     m_DecoderFps = m_PerceptualFPS / dream->activityLevel;
@@ -1568,57 +1576,77 @@ double CPlayer::GetDecoderFPS() {
     return m_DecoderFps;
 }
 
+// Which clip the on-screen stats should describe. Mid-crossfade the image is
+// mostly the incoming clip once it is past halfway, but every stat getter below
+// used to read m_currentClip unconditionally — so during each fade the HUD
+// described the outgoing clip, whose frame generation is suspended (counters
+// frozen), and then appeared to reset when the swap made the incoming clip
+// current. Caller must already hold m_UpdateMutex.
+ContentDecoder::spCClip CPlayer::StatsClipLocked() const
+{
+    if (m_isTransitioning && m_nextClip && m_transitionDuration > 0.0)
+    {
+        const double progress =
+            (m_TimelineTime - m_transitionStartTime) / m_transitionDuration;
+        if (progress >= 0.5)
+            return m_nextClip;
+    }
+
+    return m_currentClip;
+}
+
 double CPlayer::GetPresentationFPS() const
 {
     reader_lock l(m_UpdateMutex);
-    if (m_currentClip)
-        return m_currentClip->GetPresentationFps();
+    if (auto clip = StatsClipLocked())
+        return clip->GetPresentationFps();
     return m_PerceptualFPS;
 }
 
 bool CPlayer::IsFrameGenerationEnabled() const
 {
     reader_lock l(m_UpdateMutex);
-    return m_currentClip && m_currentClip->IsFrameGenerationEnabled();
+    auto clip = StatsClipLocked();
+    return clip && clip->IsFrameGenerationEnabled();
 }
 
 std::string CPlayer::GetFrameGenerationMode() const
 {
     reader_lock l(m_UpdateMutex);
-    if (m_currentClip)
-        return m_currentClip->GetFrameGenerationMode();
+    if (auto clip = StatsClipLocked())
+        return clip->GetFrameGenerationMode();
     return "off";
 }
 
 uint64_t CPlayer::GetGeneratedFrameCount() const
 {
     reader_lock l(m_UpdateMutex);
-    if (m_currentClip)
-        return m_currentClip->GetGeneratedFrameCount();
+    if (auto clip = StatsClipLocked())
+        return clip->GetGeneratedFrameCount();
     return 0;
 }
 
 uint64_t CPlayer::GetPresentedRealFrameCount() const
 {
     reader_lock l(m_UpdateMutex);
-    if (m_currentClip)
-        return m_currentClip->GetPresentedRealFrameCount();
+    if (auto clip = StatsClipLocked())
+        return clip->GetPresentedRealFrameCount();
     return 0;
 }
 
 double CPlayer::GetFrameGenerationLastTimeMs() const
 {
     reader_lock l(m_UpdateMutex);
-    if (m_currentClip)
-        return m_currentClip->GetFrameGenerationLastTimeMs();
+    if (auto clip = StatsClipLocked())
+        return clip->GetFrameGenerationLastTimeMs();
     return 0.0;
 }
 
 double CPlayer::GetFrameGenerationAverageTimeMs() const
 {
     reader_lock l(m_UpdateMutex);
-    if (m_currentClip)
-        return m_currentClip->GetFrameGenerationAverageTimeMs();
+    if (auto clip = StatsClipLocked())
+        return clip->GetFrameGenerationAverageTimeMs();
     return 0.0;
 }
 
@@ -1892,13 +1920,18 @@ void CPlayer::StartTransition()
     m_isTransitioning = true;
     m_transitionStartTime = m_TimelineTime;
 
-    // Drop RIFE on the outgoing clip for the duration of the crossfade.
+    // Pause RIFE on the outgoing clip for the duration of the crossfade.
     // Running two simultaneous RIFE inferences serialises on the shared mutex,
     // spikes CPU to 100% and causes the vsync sampler to oscillate, producing
-    // visible jitter. The outgoing clip is fading to 0 — native FPS is fine.
+    // visible jitter. The outgoing clip is fading to 0 — repeated frames are fine.
+    //
+    // This used to be ReconfigureFrameGeneration(Off), which stalled the player
+    // thread here for a whole in-flight inference (measured 19-32ms, i.e. 3-5
+    // dropped frames at 144Hz) because Configure() joins the async worker. It also
+    // discarded the frames the outgoing clip was still displaying and moved its
+    // presentation fps mid-fade. Suspending is an atomic store and keeps cadence.
     if (m_currentClip)
-        m_currentClip->ReconfigureFrameGeneration(
-            FrameGeneration::EFrameGenerationMode::Off, nullptr);
+        m_currentClip->SuspendFrameGeneration(true);
 
     // Check if the next clip is ready or still preloading
     if (m_PreloadingNextClip && !m_nextClip) {
@@ -2666,7 +2699,7 @@ bool CPlayer::PreloadClip(const std::shared_ptr<const Cache::Dream>& dream) {
     auto newClip = std::make_shared<ContentDecoder::CClip>(
         ContentDecoder::sClipMetadata{path, m_PerceptualFPS / dream->activityLevel, *dream},
         du->spRenderer, displayMode, du->spDisplay->Width(),
-        du->spDisplay->Height());
+        du->spDisplay->Height(), m_rifeInterpolator);
     
     // Update internal decoder fps counter
     m_DecoderFps = m_PerceptualFPS / dream->activityLevel;
